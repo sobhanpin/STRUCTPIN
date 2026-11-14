@@ -1,0 +1,2 @@
+# Core engine has no runtime dependencies.
+# Add packages here only after they are recorded in THIRD_PARTY_LICENSES.md.
