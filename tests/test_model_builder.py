@@ -538,7 +538,7 @@ class ErrorMessageLocationTest(unittest.TestCase):
         data["nodes"].append({"id": 4, "x": "x", "y": 0.0})
         with self.assertRaises(ModelBuildError) as ctx:
             build_model(data)
-        self.assertIn("گره‌ها، ردیف 3", str(ctx.exception))
+        self.assertIn("گره‌ها، ردیف 4", str(ctx.exception))
 
     def test_error_is_value_error_subclass(self):
         self.assertTrue(issubclass(ModelBuildError, ValueError))
