@@ -84,6 +84,11 @@ class _FakeWindow:
     def set_status(self, text):
         self.status_var.set(text)
 
+    def _reset_invalidation_flags(self):
+        self._input_change_invalidated = False
+        self._results_stale = False
+        self._stale_error_reported = False
+
 
 class _Base(unittest.TestCase):
     def setUp(self):
@@ -112,7 +117,6 @@ class MainWindowInvalidationTest(_Base):
         self.assertTrue(window._input_change_invalidated)
 
     def test_first_change_without_model_or_stale_does_nothing(self):
-        """انتظار اصلاح‌شده: بدون مدل و بدون stale، هیچ پاک‌سازی و هیچ پیامی رخ نمی‌دهد."""
         window = _FakeWindow()
         MainWindow._on_input_changed(window)
         self.assertEqual(window.results_view.clear_calls, 0)
@@ -136,7 +140,7 @@ class MainWindowInvalidationTest(_Base):
         self.assertTrue(window._results_stale)
         self.assertEqual(window.status_var.get(), _STATUS_STALE)
 
-        MainWindow._on_input_changed(window)  # تلاش مجدد، موفق
+        MainWindow._on_input_changed(window)
         self.assertEqual(window.results_view.clear_calls, 2)
         self.assertFalse(window._results_stale)
         self.assertEqual(window.status_var.get(), _STATUS_INVALIDATED)
@@ -209,8 +213,6 @@ class MainWindowInvalidationTest(_Base):
         self.assertNotIn("save_project", source)
         self.assertNotIn("load_project", source)
 
-    # --- تصمیم پرچم‌ها در تحلیل و ساخت مدل ---
-
     def test_successful_analyze_after_stale_failure_resets_all_flags(self):
         window = _FakeWindow(input_tabs=_FakeInputTabs(model=object()))
         window._results_stale = True
@@ -266,14 +268,12 @@ class _FakeEntry:
 
 
 def _open_editor(table, index, key, value):
-    """شبیه‌سازی ویرایشگر باز؛ همان صفات واقعی _RowTable."""
     table._editor = _FakeEntry(value)
     table._edit_index = index
     table._edit_key = key
 
 
 def _row_iid(table, index):
-    """شناسه واقعی Treeview برای ردیف index (از خود Treeview خوانده می‌شود)."""
     return table._tree.get_children()[index]
 
 
@@ -366,7 +366,6 @@ class InputTabsCallbackTest(unittest.TestCase):
         self.assertEqual(table._rows[0]["id"], "")
 
     def test_bool_double_click_fires_once_and_returns_real_bool(self):
-        """تغییر پرچم واقعی از مسیر _on_double_click (متد _toggle_flag وجود ندارد)."""
         table = self.tabs._tables["restraints"]
         table.add_row()
         self.calls.clear()
