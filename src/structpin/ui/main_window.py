@@ -1,4 +1,3 @@
-
 """پنجرهٔ اصلی رابط دسکتاپ STRUCTPIN."""
 
 import tkinter as tk
@@ -15,6 +14,7 @@ _MSG_NEW_PROJECT_CONFIRM = (
     "آیا مطمئن هستید که می‌خواهید پروژهٔ فعلی را ببندید "
     "و یک پروژهٔ جدید ایجاد کنید؟"
 )
+_STATUS_ANALYSIS_OK = "تحلیل انجام شد"
 
 
 class MainWindow(tk.Tk):
@@ -29,15 +29,18 @@ class MainWindow(tk.Tk):
 
         self.current_model: StructuralModel | None = None
 
-        # جلوگیری از پاک‌سازی تکراری هنگام تایپ چند کاراکتر.
+        # نتایج قبلاً برای تغییر ورودی نامعتبر شده‌اند (پاک‌سازی موفق بوده).
         self._input_change_invalidated = False
+        # پاک‌سازی نتایج ناکام بوده و باید در تغییر بعدی دوباره تلاش شود.
+        self._results_stale = False
+        # پیام خطای پاک‌سازی برای دوره‌ی فعلی ناکامی قبلاً نمایش داده شده است.
+        self._stale_error_reported = False
 
         self._actions = MainWindowActions(self)
 
         self._configure_style()
         self._build_ui()
 
-        # اتصال پس از ساخته‌شدن تمام نماهای وابسته.
         self.input_tabs.set_on_change(self._on_input_changed)
 
     def _configure_style(self) -> None:
@@ -105,13 +108,13 @@ class MainWindow(tk.Tk):
         ttk.Button(
             toolbar,
             text="ذخیره",
-            command=self._actions.save_project,
+            command=self._actions.save,
         ).pack(side=tk.LEFT, padx=3)
 
         ttk.Button(
             toolbar,
             text="بارگذاری",
-            command=self._actions.load_project,
+            command=self._actions.load,
         ).pack(side=tk.LEFT, padx=3)
 
     def set_status(self, message: str) -> None:
@@ -119,45 +122,61 @@ class MainWindow(tk.Tk):
         self.status_var.set(str(message))
 
     def _on_input_changed(self) -> None:
-        """ابطال نتایج قبلی پس از تغییر واقعی ورودی‌ها."""
-        if self._input_change_invalidated:
+        """ابطال نتایج قبلی پس از تغییر واقعی ورودی‌ها.
+
+        - اگر مدلی وجود ندارد و پاک‌سازی قبلی ناکام نبوده، هیچ کاری نمی‌کند.
+        - در غیر این صورت مدل را نامعتبر و نتایج را پاک می‌کند.
+        - اگر پاک‌سازی ناکام شود، در تغییر بعدی دوباره تلاش می‌شود.
+        - پیام خطای پاک‌سازی در هر دوره ناکامی فقط یک بار نمایش داده می‌شود.
+        """
+        if self.current_model is None and not self._results_stale:
             return
 
-        self._input_change_invalidated = True
         self.current_model = None
-
         clear_note = self._actions._clear_results_safely()
 
         if clear_note:
-            self.set_status(
-                "ورودی تغییر کرد؛ پاک‌سازی نتایج ناکامل بود"
-            )
-            messagebox.showerror(
-                "تغییر ورودی",
-                "ورودی‌ها تغییر کردند، اما پاک‌سازی کامل نتایج "
-                "موفق نبود:" + clear_note,
-                parent=self,
-            )
+            self._results_stale = True
+            self._input_change_invalidated = True
+            if not self._stale_error_reported:
+                self._stale_error_reported = True
+                self.set_status(
+                    "ورودی تغییر کرد؛ پاک‌سازی نتایج ناکامل بود"
+                )
+                messagebox.showerror(
+                    "تغییر ورودی",
+                    "ورودی‌ها تغییر کردند، اما پاک‌سازی کامل نتایج "
+                    "موفق نبود:" + clear_note,
+                    parent=self,
+                )
         else:
+            self._reset_invalidation_flags()
+            self._input_change_invalidated = True
             self.set_status("ورودی تغییر کرد؛ نتایج قبلی پاک شدند")
 
     def _on_build_model(self) -> None:
-        """اجرای ساخت مدل و آماده‌سازی برای تغییرات بعدی."""
-        self._input_change_invalidated = False
+        """ساخت مدل. فقط در صورت موفقیت، تشخیص تغییر دوباره فعال می‌شود."""
         self._actions.build_model()
+        if self.current_model is not None:
+            self._input_change_invalidated = False
 
     def _on_analyze(self) -> None:
-        """اجرای تحلیل و آماده‌سازی برای تغییرات بعدی."""
-        self._input_change_invalidated = False
+        """تحلیل.
+
+        - موفق: هر سه پرچم بازنشانی می‌شوند (گزارش تازه نتایج قدیمی را جایگزین کرده است).
+        - ناموفق: وضعیت stale حفظ می‌شود.
+        """
         self._actions.analyze()
+        if self.status_var.get() == _STATUS_ANALYSIS_OK:
+            self._reset_invalidation_flags()
+
+    def _reset_invalidation_flags(self) -> None:
+        self._input_change_invalidated = False
+        self._results_stale = False
+        self._stale_error_reported = False
 
     def _on_new_project(self) -> None:
-        """تأیید و پاک‌سازی پروژهٔ فعلی.
-
-        در صورت لغو، هیچ تغییری ایجاد نمی‌شود.
-        پاک‌سازی دو نمای نتایج از طریق Actions انجام می‌شود تا
-        شکست پاک‌سازی یکی مانع تلاش برای پاک‌سازی دیگری نشود.
-        """
+        """تأیید و پاک‌سازی پروژهٔ فعلی. در صورت لغو هیچ تغییری ایجاد نمی‌شود."""
         try:
             confirmed = messagebox.askyesno(
                 "پروژه جدید",
@@ -171,15 +190,14 @@ class MainWindow(tk.Tk):
             self.current_model = None
             clear_note = self._actions._clear_results_safely()
 
-            # فرم و نماها اکنون پاک هستند؛ تغییرات بعدی نباید
-            # باعث پاک‌سازی تکراری شوند.
-            self._input_change_invalidated = True
-
         except Exception as exc:
             self._actions.report_unexpected("پروژه جدید", exc)
             return
 
         if clear_note:
+            self._results_stale = True
+            self._stale_error_reported = True
+            self._input_change_invalidated = True
             self.set_status("پروژه جدید؛ پاک‌سازی نتایج ناکامل بود")
             messagebox.showerror(
                 "پروژه جدید",
@@ -187,6 +205,8 @@ class MainWindow(tk.Tk):
                 parent=self,
             )
         else:
+            self._reset_invalidation_flags()
+            self._input_change_invalidated = True
             self.set_status("پروژه جدید")
 
 
