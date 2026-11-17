@@ -3,7 +3,6 @@
 
 import tkinter as tk
 from tkinter import messagebox, ttk
-from tkinter import font as tkfont
 
 from structpin.model.structural_model import StructuralModel
 from structpin.ui.actions import MainWindowActions
@@ -29,10 +28,17 @@ class MainWindow(tk.Tk):
         self.minsize(960, 600)
 
         self.current_model: StructuralModel | None = None
+
+        # جلوگیری از پاک‌سازی تکراری هنگام تایپ چند کاراکتر.
+        self._input_change_invalidated = False
+
         self._actions = MainWindowActions(self)
 
         self._configure_style()
         self._build_ui()
+
+        # اتصال پس از ساخته‌شدن تمام نماهای وابسته.
+        self.input_tabs.set_on_change(self._on_input_changed)
 
     def _configure_style(self) -> None:
         """تنظیم ظاهر پایهٔ رابط کاربری."""
@@ -87,13 +93,13 @@ class MainWindow(tk.Tk):
         ttk.Button(
             toolbar,
             text="ساخت مدل",
-            command=self._actions.build_model,
+            command=self._on_build_model,
         ).pack(side=tk.LEFT, padx=3)
 
         ttk.Button(
             toolbar,
             text="تحلیل",
-            command=self._actions.analyze,
+            command=self._on_analyze,
         ).pack(side=tk.LEFT, padx=3)
 
         ttk.Button(
@@ -111,6 +117,39 @@ class MainWindow(tk.Tk):
     def set_status(self, message: str) -> None:
         """به‌روزرسانی پیام نوار وضعیت."""
         self.status_var.set(str(message))
+
+    def _on_input_changed(self) -> None:
+        """ابطال نتایج قبلی پس از تغییر واقعی ورودی‌ها."""
+        if self._input_change_invalidated:
+            return
+
+        self._input_change_invalidated = True
+        self.current_model = None
+
+        clear_note = self._actions._clear_results_safely()
+
+        if clear_note:
+            self.set_status(
+                "ورودی تغییر کرد؛ پاک‌سازی نتایج ناکامل بود"
+            )
+            messagebox.showerror(
+                "تغییر ورودی",
+                "ورودی‌ها تغییر کردند، اما پاک‌سازی کامل نتایج "
+                "موفق نبود:" + clear_note,
+                parent=self,
+            )
+        else:
+            self.set_status("ورودی تغییر کرد؛ نتایج قبلی پاک شدند")
+
+    def _on_build_model(self) -> None:
+        """اجرای ساخت مدل و آماده‌سازی برای تغییرات بعدی."""
+        self._input_change_invalidated = False
+        self._actions.build_model()
+
+    def _on_analyze(self) -> None:
+        """اجرای تحلیل و آماده‌سازی برای تغییرات بعدی."""
+        self._input_change_invalidated = False
+        self._actions.analyze()
 
     def _on_new_project(self) -> None:
         """تأیید و پاک‌سازی پروژهٔ فعلی.
@@ -131,6 +170,10 @@ class MainWindow(tk.Tk):
             self.input_tabs.clear_form()
             self.current_model = None
             clear_note = self._actions._clear_results_safely()
+
+            # فرم و نماها اکنون پاک هستند؛ تغییرات بعدی نباید
+            # باعث پاک‌سازی تکراری شوند.
+            self._input_change_invalidated = True
 
         except Exception as exc:
             self._actions.report_unexpected("پروژه جدید", exc)
