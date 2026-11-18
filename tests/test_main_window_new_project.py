@@ -1,8 +1,9 @@
 """تست‌های MainWindow._on_new_project بدون ساخت پنجرهٔ واقعی Tkinter.
 
-FakeWindow جای MainWindow را می‌گیرد و MainWindow._on_new_project مستقیم با آن
-فراخوانی می‌شود. MainWindowActions واقعی با ویوهای ساختگی استفاده می‌شود.
-messagebox در ماژول main_window patch می‌شود.
+FakeWindow جای MainWindow را می‌گیرد. توابع فلگ و _on_new_project مستقیم از MainWindow
+به‌عنوان ویژگی کلاس روی FakeWindow قرار می‌گیرند، تا همان کدِ واقعی اجرا شود.
+MainWindowActions واقعی با ویوهای ساختگی استفاده می‌شود.
+messagebox در ماژول main_window patch می‌شود. هیچ نمایشگری لازم نیست.
 
 اجرا (ریشهٔ مخزن):
     $env:PYTHONPATH="src"; python -m unittest discover -s tests -p "test_main_window_new_project.py" -v
@@ -39,7 +40,17 @@ class _FakeView:
 
 
 class _FakeWindow:
-    """جایگزین ساختگی MainWindow با ویژگی‌ها و متدهای لازم برای _on_new_project."""
+    """جایگزین ساختگی MainWindow.
+
+    توابع فلگ و _on_new_project از MainWindow به‌عنوان ویژگی کلاس قرار گرفته‌اند
+    تا همان کد واقعی روی این شیء اجرا شود.
+    """
+
+    _read_stale = MainWindow._read_stale
+    _write_stale = MainWindow._write_stale
+    _clear_outcome_of = MainWindow._clear_outcome_of
+    _status_is = MainWindow._status_is
+    _on_new_project = MainWindow._on_new_project
 
     def __init__(self, input_tabs=None, results_view=None, plot_canvas=None, current_model=None):
         self.input_tabs = input_tabs if input_tabs is not None else _FakeInputTabs()
@@ -55,11 +66,6 @@ class _FakeWindow:
     def set_status(self, text):
         self.statuses.append(text)
 
-    def _reset_invalidation_flags(self):
-        self._input_change_invalidated = False
-        self._results_stale = False
-        self._stale_error_reported = False
-
 
 class NewProjectTest(unittest.TestCase):
 
@@ -74,7 +80,7 @@ class NewProjectTest(unittest.TestCase):
         return mocked
 
     def _run(self, window):
-        MainWindow._on_new_project(window)
+        window._on_new_project()
 
     def test_cancel_changes_nothing(self):
         self.askyesno.return_value = False
@@ -96,6 +102,10 @@ class NewProjectTest(unittest.TestCase):
         self.assertEqual(window.results_view.clear_calls, 1)
         self.assertEqual(window.plot_canvas.clear_calls, 1)
         self.assertEqual(window.statuses, ["پروژه جدید"])
+        self.assertEqual(
+            (window._input_change_invalidated, window._results_stale, window._stale_error_reported),
+            (True, False, False),
+        )
         self.showerror.assert_not_called()
 
     def test_results_view_failure_still_clears_plot_and_reports(self):
@@ -107,6 +117,7 @@ class NewProjectTest(unittest.TestCase):
         self.assertEqual(window.plot_canvas.clear_calls, 1)
         self.assertIsNone(window.current_model)
         self.assertEqual(window.statuses, ["پروژه جدید؛ پاک‌سازی نتایج ناکامل بود"])
+        self.assertTrue(window._results_stale)
         self.showerror.assert_called_once()
         self.assertEqual(self.showerror.call_args[0][0], "پروژه جدید")
         self.assertIn("جدول قفل", self.showerror.call_args[0][1])
@@ -120,6 +131,7 @@ class NewProjectTest(unittest.TestCase):
         self.assertEqual(window.results_view.clear_calls, 1)
         self.assertIsNone(window.current_model)
         self.assertEqual(window.statuses, ["پروژه جدید؛ پاک‌سازی نتایج ناکامل بود"])
+        self.assertTrue(window._results_stale)
         self.showerror.assert_called_once()
         self.assertIn("نمودار قفل", self.showerror.call_args[0][1])
 
