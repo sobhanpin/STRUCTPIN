@@ -1,23 +1,11 @@
+
 """رابط ورود اطلاعات مدل قاب دوبعدی STRUCTPIN (tkinter و ttk استاندارد).
 
-این ماژول فقط لایهٔ ورود داده است:
-    - هیچ محاسبهٔ مهندسی، تحلیل یا اعتبارسنجی هندسی در این ماژول انجام نمی‌شود.
-    - داده‌ها به‌صورت خام (متن یا bool) نگه داشته می‌شوند و تبدیل نهایی به عدد
-      و اعتبارسنجی فقط توسط services.model_builder.build_model انجام می‌شود.
-    - وابستگی به main_window وجود ندارد.
-
-APIهای عمومی:
-    get_form_data()   دیکشنری سازگار با build_model
-    set_form_data(d)  بارگذاری دیکشنری در فرم (پس از پاک‌سازی)
-    build_model()     ساخت StructuralModel از فرم؛ ModelBuildError منتشر می‌شود
-    clear_form()      پاک‌سازی کامل فرم
-
-قاعدهٔ جریان کنترل در جدول‌ها:
-    _commit_edit() تنها مسئول ثبت ویرایش باز است و در پایان یک بار _refresh() را صدا می‌زند.
-    _refresh() هرگز _commit_edit() را صدا نمی‌زند؛ بنابراین بازگشت بی‌نهایت رخ نمی‌دهد.
-    هر تابعی که پیش از تغییر داده باید ویرایش باز را ثبت کند، خودش _commit_edit() را صدا می‌زند.
+این ماژول فقط لایه ورود داده است.
+اعتبارسنجی و تبدیل نهایی داده‌ها توسط model_builder انجام می‌شود.
 """
 
+import contextlib
 import tkinter as tk
 from collections import namedtuple
 from tkinter import ttk
@@ -101,7 +89,7 @@ _TABLE_KEYS = tuple(spec[0] for spec in _TABLE_SPECS)
 
 
 def _configure_styles(master):
-    """تنظیم سبک ظاهری ttk (تم تیره سرمه‌ای/خاکستری با تأکید آبی و طلایی)."""
+    """تنظیم سبک ظاهری ttk."""
     style = ttk.Style(master)
     try:
         style.theme_use("clam")
@@ -139,17 +127,9 @@ def _configure_styles(master):
 
 
 class _RowTable(ttk.Frame):
-    """جدول ورود ردیف‌ها با ذخیرهٔ داده در فهرست پایتونی.
+    """جدول ورود داده با امکان اطلاع‌رسانی تغییرات واقعی کاربر."""
 
-    منبع حقیقت، فهرست self._rows است؛ Treeview فقط نمایش می‌دهد.
-
-    قواعد جریان کنترل (برای جلوگیری از بازگشت بی‌نهایت):
-        - _refresh() هیچ‌گاه _commit_edit() را صدا نمی‌زند.
-        - _commit_edit() فقط ویرایشگر را ثبت و می‌بندد، سپس یک بار _refresh() را صدا می‌زند.
-        - توابع عمومی که داده را تغییر می‌دهند، پیش از تغییر خودشان _commit_edit() را صدا می‌زنند.
-    """
-
-    def __init__(self, master, columns, hint):
+    def __init__(self, master, columns, hint, on_change=None):
         super().__init__(master, padding=(8, 8))
         self._columns = tuple(columns)
         self._keys = tuple(c.key for c in self._columns)
@@ -157,6 +137,7 @@ class _RowTable(ttk.Frame):
         self._editor = None
         self._edit_index = None
         self._edit_key = None
+        self._on_change = on_change
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -164,10 +145,14 @@ class _RowTable(ttk.Frame):
         toolbar = ttk.Frame(self)
         toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         ttk.Label(toolbar, text=hint, style="Hint.TLabel").pack(side="left")
-        ttk.Button(toolbar, text="حذف ردیف‌های انتخاب‌شده",
-                   command=self.delete_selected).pack(side="right", padx=(6, 0))
-        ttk.Button(toolbar, text="افزودن ردیف",
-                   command=self.add_row).pack(side="right", padx=(6, 0))
+        ttk.Button(
+            toolbar, text="حذف ردیف‌های انتخاب‌شده",
+            command=self.delete_selected
+        ).pack(side="right", padx=(6, 0))
+        ttk.Button(
+            toolbar, text="افزودن ردیف",
+            command=self.add_row
+        ).pack(side="right", padx=(6, 0))
 
         body = ttk.Frame(self)
         body.grid(row=1, column=0, sticky="nsew")
@@ -186,7 +171,9 @@ class _RowTable(ttk.Frame):
         vsb.grid(row=0, column=1, sticky="ns")
 
         self._tree.heading("row_no", text="ردیف", anchor="center")
-        self._tree.column("row_no", width=60, minwidth=50, stretch=False, anchor="center")
+        self._tree.column("row_no", width=60, minwidth=50,
+                          stretch=False, anchor="center")
+
         for col in self._columns:
             self._tree.heading(col.key, text=col.heading, anchor="center")
             self._tree.column(col.key, width=col.width, minwidth=60,
@@ -198,85 +185,126 @@ class _RowTable(ttk.Frame):
         self._tree.bind("<Button-4>", self._on_wheel_up_linux)
         self._tree.bind("<Button-5>", self._on_wheel_down_linux)
 
-    # ------------------------------------------------------------------
-    # API داخلی جدول
-    # ------------------------------------------------------------------
+    def _notify(self):
+        if self._on_change is not None:
+            self._on_change()
 
     def selected_indices(self):
         return [int(iid) for iid in self._tree.selection()]
 
+    def _flush_edit_silently(self):
+        """ثبت ویرایش باز بدون ارسال callback."""
+        editor = self._editor
+        if editor is None:
+            return False
+
+        value = editor.get()
+        index = self._edit_index
+        key = self._edit_key
+        self._close_editor()
+
+        if index is None or key is None or not (0 <= index < len(self._rows)):
+            self._refresh()
+            return False
+
+        changed = self._rows[index][key] != value
+        if changed:
+            self._rows[index][key] = value
+        self._refresh()
+        return changed
+
     def add_row(self):
-        self._commit_edit()
+        self._flush_edit_silently()
+
         row = {}
         for col in self._columns:
             if col.kind == _KIND_BOOL:
                 row[col.key] = tk.BooleanVar(master=self, value=False)
             else:
                 row[col.key] = ""
+
         self._rows.append(row)
         new_index = len(self._rows) - 1
         self._refresh(select=[new_index])
         self._tree.see(str(new_index))
+        self._notify()
 
     def delete_selected(self):
-        self._commit_edit()
+        edited = self._flush_edit_silently()
         indices = sorted(set(self.selected_indices()), reverse=True)
-        if not indices:
-            return
+
+        deleted = False
         for index in indices:
             if 0 <= index < len(self._rows):
                 del self._rows[index]
-        self._refresh(select=[])
+                deleted = True
+
+        if deleted:
+            self._refresh(select=[])
+        if deleted or edited:
+            self._notify()
 
     def clear(self):
         self._close_editor()
         self._rows = []
         self._refresh(select=[])
 
+    def has_data(self):
+        return bool(self._rows or self._editor is not None)
+
     def get_rows(self):
-        """فهرست دیکشنری‌ها با کلیدهای دقیق ستون‌ها؛ bool ها bool واقعی هستند."""
-        self._commit_edit()
+        """دریافت داده بدون ایجاد callback ناخواسته."""
+        self._flush_edit_silently()
         result = []
+
         for row in self._rows:
             item = {}
             for col in self._columns:
                 value = row[col.key]
-                item[col.key] = bool(value.get()) if col.kind == _KIND_BOOL else value
+                item[col.key] = (
+                    bool(value.get()) if col.kind == _KIND_BOOL else value
+                )
             result.append(item)
+
         return result
 
     def set_rows(self, items):
-        """جایگزینی کامل ردیف‌ها با فهرست دیکشنری‌ها (ورودی تغییر نمی‌کند)."""
+        """جایگزینی برنامه‌ای ردیف‌ها بدون callback."""
         self._close_editor()
         new_rows = []
+
         for position, item in enumerate(items, start=1):
             if not isinstance(item, dict):
                 raise ValueError(f"ردیف {position}: هر ردیف باید دیکشنری باشد")
+
             row = {}
             for col in self._columns:
                 raw = item.get(col.key)
+
                 if col.kind == _KIND_BOOL:
                     if raw is None:
                         raw = False
                     if not isinstance(raw, bool):
                         raise ValueError(
-                            f"ردیف {position}، «{col.heading}»: مقدار باید بله/خیر (bool) باشد"
+                            f"ردیف {position}، «{col.heading}»: "
+                            "مقدار باید بله/خیر (bool) باشد"
                         )
                     row[col.key] = tk.BooleanVar(master=self, value=raw)
                 else:
                     row[col.key] = "" if raw is None else str(raw)
+
             new_rows.append(row)
+
         self._rows = new_rows
         self._refresh(select=[])
 
-    # ------------------------------------------------------------------
-    # نمایش (هیچ‌گاه _commit_edit را صدا نمی‌زند)
-    # ------------------------------------------------------------------
-
     def _refresh(self, select=None):
+        """بازسازی نمایش؛ بدون ثبت ویرایش باز."""
         if select is None:
             select = self.selected_indices()
+
         self._tree.delete(*self._tree.get_children())
+
         for index, row in enumerate(self._rows):
             values = [str(index + 1)]
             for col in self._columns:
@@ -285,44 +313,52 @@ class _RowTable(ttk.Frame):
                     values.append("بله" if value.get() else "خیر")
                 else:
                     values.append(value)
+
             self._tree.insert("", "end", iid=str(index), values=values)
+
         valid = [str(i) for i in select if 0 <= i < len(self._rows)]
         if valid:
             self._tree.selection_set(valid)
 
-    # ------------------------------------------------------------------
-    # ویرایش سلول
-    # ------------------------------------------------------------------
-
     def _on_double_click(self, event):
         if self._tree.identify_region(event.x, event.y) != "cell":
             return "break"
+
         row_id = self._tree.identify_row(event.y)
         col_id = self._tree.identify_column(event.x)
         if not row_id or not col_id:
             return "break"
+
         col_pos = int(col_id.lstrip("#")) - 2
-        if col_pos < 0 or col_pos >= len(self._columns):
+        if not 0 <= col_pos < len(self._columns):
             return "break"
+
         index = int(row_id)
         if index >= len(self._rows):
             return "break"
+
         column = self._columns[col_pos]
-        row = self._rows[index]
+
         if column.kind == _KIND_BOOL:
-            self._commit_edit()
-            flag = row[column.key]
+            self._flush_edit_silently()
+            flag = self._rows[index][column.key]
             flag.set(not flag.get())
             self._refresh()
+            self._notify()
             return "break"
+
         self._open_editor(index, column, row_id, col_id)
         return "break"
 
     def _open_editor(self, index, column, row_id, col_id):
-        self._commit_edit()
+        edited = self._flush_edit_silently()
+        if edited:
+            self._notify()
+
         bbox = self._tree.bbox(row_id, col_id)
         if not bbox:
             return
+
         x, y, width, height = bbox
         editor = ttk.Entry(self._tree, justify="right")
         editor.insert(0, self._rows[index][column.key])
@@ -331,27 +367,19 @@ class _RowTable(ttk.Frame):
         editor.bind("<KP_Enter>", self._commit_edit)
         editor.bind("<FocusOut>", self._commit_edit)
         editor.bind("<Escape>", self._cancel_edit)
+
         self._editor = editor
         self._edit_index = index
         self._edit_key = column.key
+
         editor.focus_set()
         editor.select_range(0, "end")
 
     def _commit_edit(self, _event=None):
-        """ثبت ویرایش باز، بستن ویرایشگر و یک بار بازسازی جدول.
-
-        این تابع فقط یک بار _refresh() را صدا می‌زند و هیچ‌گاه خودش را دوباره فرا نمی‌خواند.
-        """
-        editor = self._editor
-        if editor is None:
-            return "break"
-        value = editor.get()
-        index = self._edit_index
-        key = self._edit_key
-        self._close_editor()
-        if index is not None and key is not None and index < len(self._rows):
-            self._rows[index][key] = value
-        self._refresh()
+        """ثبت ویرایش و اعلام تغییر فقط در صورت تغییر واقعی مقدار."""
+        changed = self._flush_edit_silently()
+        if changed:
+            self._notify()
         return "break"
 
     def _cancel_edit(self, _event=None):
@@ -363,14 +391,11 @@ class _RowTable(ttk.Frame):
         editor = self._editor
         if editor is None:
             return
+
         self._editor = None
         self._edit_index = None
         self._edit_key = None
         editor.destroy()
-
-    # ------------------------------------------------------------------
-    # رویدادهای صفحه‌کلید و ماوس
-    # ------------------------------------------------------------------
 
     def _on_delete_key(self, _event=None):
         self.delete_selected()
@@ -391,61 +416,127 @@ class _RowTable(ttk.Frame):
 
 
 class InputTabs(ttk.Frame):
-    """فرم ورود اطلاعات قاب دوبعدی با هشت تب.
-
-    داده‌ها در خود فرم نگه داشته می‌شوند و بین تب‌ها جابه‌جا شدن آن‌ها را
-    پاک نمی‌کند. برای ساخت مدل از build_model و برای بارگذاری/خروج داده از
-    get_form_data و set_form_data استفاده کنید.
-    """
+    """فرم ورود اطلاعات قاب دوبعدی."""
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
         _configure_styles(self)
 
         self._project_name = tk.StringVar(master=self, value="")
+        self._on_change_callback = None
+        self._quiet_depth = 0
+        self._last_name = ""
+
+        self._project_name.trace_add("write", self._on_name_var_write)
+
         self._tables = {}
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
         self._notebook = ttk.Notebook(self)
-        self._notebook.grid(row=0, column=0, sticky="nsew", padx=8, pady=(8, 4))
+        self._notebook.grid(row=0, column=0, sticky="nsew",
+                            padx=8, pady=(8, 4))
 
         self._build_project_tab()
+
         for key, title, columns, hint in _TABLE_SPECS:
-            table = _RowTable(self._notebook, columns, hint)
+            table = _RowTable(
+                self._notebook,
+                columns,
+                hint,
+                on_change=self._notify_user_change,
+            )
             self._notebook.add(table, text=title)
             self._tables[key] = table
 
         footer = ttk.Frame(self)
         footer.grid(row=1, column=0, sticky="ew", padx=8, pady=(4, 8))
-        ttk.Button(footer, text="پاک‌کردن فرم", command=self.clear_form).pack(side="left")
+        ttk.Button(
+            footer,
+            text="پاک‌کردن فرم",
+            command=self._on_clear_button,
+        ).pack(side="left")
 
     def _build_project_tab(self):
         frame = ttk.Frame(self._notebook, padding=16)
         frame.columnconfigure(1, weight=1)
-        ttk.Label(frame, text="نام پروژه:").grid(row=0, column=0, sticky="e", padx=(0, 10), pady=6)
-        entry = ttk.Entry(frame, textvariable=self._project_name, justify="right")
+
+        ttk.Label(
+            frame, text="نام پروژه:"
+        ).grid(row=0, column=0, sticky="e", padx=(0, 10), pady=6)
+
+        entry = ttk.Entry(
+            frame,
+            textvariable=self._project_name,
+            justify="right",
+        )
         entry.grid(row=0, column=1, sticky="ew", pady=6)
+
         self._notebook.add(frame, text="اطلاعات پروژه")
+
+    # ------------------------------------------------------------------
+    # سیستم اعلان تغییرات
+    # ------------------------------------------------------------------
+
+    def set_on_change(self, callback):
+        """تنظیم callback تغییرات واقعی کاربر."""
+        if callback is not None and not callable(callback):
+            raise TypeError("callback باید قابل فراخوانی باشد")
+        self._on_change_callback = callback
+
+    @contextlib.contextmanager
+    def _quiet(self):
+        """جلوگیری از اعلان هنگام تغییرات برنامه‌ای فرم."""
+        self._quiet_depth += 1
+        try:
+            yield
+        finally:
+            self._quiet_depth -= 1
+
+    def _notify_user_change(self):
+        if self._quiet_depth > 0:
+            return
+
+        callback = self._on_change_callback
+        if callback is not None:
+            callback()
+
+    def _on_name_var_write(self, *_args):
+        name = self._project_name.get()
+        if name == self._last_name:
+            return
+
+        self._last_name = name
+        self._notify_user_change()
+
+    def _has_any_data(self):
+        if self._project_name.get():
+            return True
+        return any(table.has_data() for table in self._tables.values())
+
+    def _on_clear_button(self):
+        if not self._has_any_data():
+            return
+
+        self.clear_form()
+        self._notify_user_change()
 
     # ------------------------------------------------------------------
     # API عمومی
     # ------------------------------------------------------------------
 
     def get_form_data(self):
-        """داده‌های فرم را به صورت دیکشنری سازگار با build_model برمی‌گرداند."""
+        """دریافت داده‌های فرم بدون اعلان تغییر ناخواسته."""
         data = {"name": self._project_name.get()}
+
         for key in _TABLE_KEYS:
             data[key] = self._tables[key].get_rows()
+
         return data
 
     def set_form_data(self, data):
-        """داده‌های دیکشنری را در فرم بارگذاری می‌کند.
-
-        قبل از بارگذاری، فرم کاملاً پاک می‌شود. اگر داده نامعتبر باشد،
-        ValueError با پیام فارسی پرتاب و فرم پاک‌شده باقی می‌ماند.
-        """
+        """بارگذاری برنامه‌ای فرم بدون ایجاد callback تغییر کاربر."""
         if not isinstance(data, dict):
             raise ValueError("داده‌های فرم باید دیکشنری باشند")
 
@@ -464,24 +555,28 @@ class InputTabs(ttk.Frame):
                 raise ValueError(f"بخش «{title}» باید فهرست باشد")
             sections[key] = value
 
-        self.clear_form()
-        try:
-            self._project_name.set(name)
-            for key in _TABLE_KEYS:
-                self._tables[key].set_rows(sections[key])
-        except ValueError:
+        with self._quiet():
             self.clear_form()
-            raise
+            try:
+                self._project_name.set(name)
+                self._last_name = name
+
+                for key in _TABLE_KEYS:
+                    self._tables[key].set_rows(sections[key])
+
+            except ValueError:
+                self.clear_form()
+                raise
 
     def build_model(self):
-        """ساخت StructuralModel از فرم.
-
-        ModelBuildError از سرویس پنهان نمی‌شود و به فراخواننده منتقل می‌شود.
-        """
+        """ساخت StructuralModel با استفاده از سرویس model_builder."""
         return build_structural_model(self.get_form_data())
 
     def clear_form(self):
-        """پاک‌سازی همهٔ ورودی‌ها و بازگرداندن فرم به وضعیت اولیه."""
-        self._project_name.set("")
-        for key in _TABLE_KEYS:
-            self._tables[key].clear()
+        """پاک‌سازی برنامه‌ای فرم بدون اعلان تغییر کاربر."""
+        with self._quiet():
+            self._project_name.set("")
+            self._last_name = ""
+
+            for key in _TABLE_KEYS:
+                self._tables[key].clear()
