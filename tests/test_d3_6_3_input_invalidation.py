@@ -2,6 +2,8 @@
 
 - MainWindowInvalidationTest: منطق MainWindow با FakeWindow و MainWindowActions واقعی.
   به نمایشگر نیاز ندارد؛ messagebox و run_frame_analysis با mock جایگزین شده‌اند.
+  گزارش‌های تحلیل موفق، AnalysisReport معتبر هستند تا اعتبارسنجی مشترک
+  validate_report_numbers در actions روی داده واقعی اجرا شود.
 - InputTabsCallbackTest: کد واقعی InputTabs با Tk. بدون نمایشگر کل کلاس SkipTest می‌دهد.
   Skip موفقیت حساب نمی‌شود.
 
@@ -14,7 +16,7 @@ import tkinter as tk
 import unittest
 from unittest import mock
 
-from structpin.services.analysis_service import AnalysisInputError
+from structpin.services.analysis_service import AnalysisInputError, AnalysisReport
 from structpin.ui import actions as actions_module
 from structpin.ui import main_window as main_window_module
 from structpin.ui.actions import MainWindowActions
@@ -25,6 +27,27 @@ _STATUS_STALE = "ورودی تغییر کرد؛ پاک‌سازی نتایج ن�
 _STATUS_ANALYSIS_OK = "تحلیل انجام شد"
 _STATUS_NEW_PROJECT = "پروژه جدید"
 _STATUS_NEW_PROJECT_STALE = "پروژه جدید؛ پاک‌سازی نتایج ناکامل بود"
+
+
+def _valid_report():
+    """گزارش معتبر با ساختار واقعی AnalysisReport (مقادیر نمونه، بدون محاسبهٔ مهندسی)."""
+    return AnalysisReport(
+        displacements={1: (0.0, 0.0, 0.0), 2: (0.001, -0.002, 0.0005)},
+        reactions={1: (-10.0, 5.0, 2.5)},
+        member_end_actions={
+            1: ((10.0, 5.0, 0.0), (-10.0, -5.0, 12.5)),
+        },
+        internal_forces={
+            1: {
+                "x": (0.0, 1.0, 2.0),
+                "N": (10.0, 10.0, 10.0),
+                "V": (5.0, 5.0, -5.0),
+                "M": (0.0, 5.0, 0.0),
+            },
+        },
+        n_points=3,
+        warnings=(),
+    )
 
 
 class _FakeVar:
@@ -95,7 +118,7 @@ class _Base(unittest.TestCase):
         self.askyesno = self._patch(main_window_module.messagebox, "askyesno", return_value=True)
         self.showerror = self._patch(main_window_module.messagebox, "showerror")
         self.showinfo = self._patch(actions_module.messagebox, "showinfo")
-        self.run_analysis = self._patch(actions_module, "run_frame_analysis", return_value="REPORT")
+        self.run_analysis = self._patch(actions_module, "run_frame_analysis", return_value=_valid_report())
 
     def _patch(self, target, name, **kwargs):
         patcher = mock.patch.object(target, name, **kwargs)
@@ -214,12 +237,20 @@ class MainWindowInvalidationTest(_Base):
         self.assertNotIn("load_project", source)
 
     def test_successful_analyze_after_stale_failure_resets_all_flags(self):
+        """تحلیل موفق با گزارش معتبر AnalysisReport پس از شکست stale.
+
+        گزارش معتبر از run_frame_analysis برمی‌گردد، از validate_report_numbers
+        عبور می‌کند و به results_view.show_report می‌رسد. سپس هر سه فلگ بازنشانی می‌شوند.
+        """
+        report = _valid_report()
+        self.run_analysis.return_value = report
         window = _FakeWindow(input_tabs=_FakeInputTabs(model=object()))
         window._results_stale = True
         window._stale_error_reported = True
         window._input_change_invalidated = True
         MainWindow._on_analyze(window)
-        self.assertEqual(window.results_view.show_calls, ["REPORT"])
+        self.assertEqual(len(window.results_view.show_calls), 1)
+        self.assertIs(window.results_view.show_calls[0], report)
         self.assertEqual(window.status_var.get(), _STATUS_ANALYSIS_OK)
         self.assertFalse(window._results_stale)
         self.assertFalse(window._stale_error_reported)
@@ -236,6 +267,8 @@ class MainWindowInvalidationTest(_Base):
         self.assertTrue(window._stale_error_reported)
 
     def test_successful_build_only_rearms_change_detection(self):
+        # توجه: این تست هنوز انتظار رفتار قبلی (حفظ فلگ‌های stale پس از ساخت موفق) را دارد.
+        # طبق تصمیم تأییدشده، با جایگزینی main_window.py این انتظار باید به رفتار جدید تغییر کند.
         window = _FakeWindow(input_tabs=_FakeInputTabs(model=object()))
         window._results_stale = True
         window._stale_error_reported = True
