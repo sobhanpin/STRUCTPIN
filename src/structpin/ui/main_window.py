@@ -1,4 +1,23 @@
-"""پنجرهٔ اصلی رابط دسکتاپ STRUCTPIN."""
+"""پنجرهٔ اصلی رابط دسکتاپ STRUCTPIN.
+
+مالکیت فلگ‌های stale:
+    - تنها منبع قاعدهٔ انتقال سه فلگ، ماشین حالت StaleState در stale_state.py است.
+    - MainWindow وضعیت سه فلگ را از ویژگی‌های خود می‌خواند، توسط StaleState
+      به‌روز می‌کند و پیام و پاک‌سازی را انجام می‌دهد.
+    - actions هیچ فلگی را تغییر نمی‌دهد؛ فقط last_clear_ok را به‌روز می‌کند.
+
+ذخیره و بارگذاری:
+    دکمه‌های Toolbar به wrapperهای _save و _load متصل‌اند. هر wrapper:
+        1. پیش از عملیات، last_clear_ok را None می‌کند تا نتیجهٔ قدیمی
+           با نتیجهٔ عملیات جدید اشتباه گرفته نشود.
+        2. عملیات actions.save یا actions.load را فراخوانی می‌کند.
+        3. موفقیت را از وضعیت موفقیت عملیات (متن status) تشخیص می‌دهد.
+        4. فقط اگر پاک‌سازی واقعاً انجام شده باشد (last_clear_ok از None خارج شده)،
+           نتیجه را به StaleState می‌دهد. در غیر این صورت فلگ‌ها بدون تغییر می‌مانند.
+    پاک‌سازی ناموفق موفقیت عملیات را پنهان نمی‌کند؛ فقط وضعیت stale ثبت می‌شود.
+"""
+
+from __future__ import annotations
 
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -8,13 +27,22 @@ from structpin.ui.actions import MainWindowActions
 from structpin.ui.input_tabs import InputTabs
 from structpin.ui.plot_canvas import PlotCanvas
 from structpin.ui.results_view import ResultsView
+from structpin.ui.stale_state import StaleState
 
 
 _MSG_NEW_PROJECT_CONFIRM = (
     "آیا مطمئن هستید که می‌خواهید پروژهٔ فعلی را ببندید "
     "و یک پروژهٔ جدید ایجاد کنید؟"
 )
+
+_STATUS_BUILD_OK = "مدل ساخته شد"
+_STATUS_SAVE_OK = "پروژه ذخیره شد"
+_STATUS_LOAD_OK = "پروژه بارگذاری شد"
 _STATUS_ANALYSIS_OK = "تحلیل انجام شد"
+_STATUS_INVALIDATED = "ورودی تغییر کرد؛ نتایج قبلی پاک شدند"
+_STATUS_STALE = "ورودی تغییر کرد؛ پاک‌سازی نتایج ناکامل بود"
+_STATUS_NEW_PROJECT = "پروژه جدید"
+_STATUS_NEW_PROJECT_STALE = "پروژه جدید؛ پاک‌سازی نتایج ناکامل بود"
 
 
 class MainWindow(tk.Tk):
@@ -29,11 +57,9 @@ class MainWindow(tk.Tk):
 
         self.current_model: StructuralModel | None = None
 
-        # نتایج قبلاً برای تغییر ورودی نامعتبر شده‌اند (پاک‌سازی موفق بوده).
+        # سه فلگ stale. تغییر آن‌ها فقط از طریق _read_stale / _write_stale و StaleState انجام می‌شود.
         self._input_change_invalidated = False
-        # پاک‌سازی نتایج ناکام بوده و باید در تغییر بعدی دوباره تلاش شود.
         self._results_stale = False
-        # پیام خطای پاک‌سازی برای دوره‌ی فعلی ناکامی قبلاً نمایش داده شده است.
         self._stale_error_reported = False
 
         self._actions = MainWindowActions(self)
@@ -42,6 +68,41 @@ class MainWindow(tk.Tk):
         self._build_ui()
 
         self.input_tabs.set_on_change(self._on_input_changed)
+
+    # ------------------------------------------------------------------
+    # ابزارهای فلگ (تنها پل بین سه ویژگی و StaleState)
+    # ------------------------------------------------------------------
+
+    def _read_stale(self) -> StaleState:
+        return StaleState(
+            input_change_invalidated=self._input_change_invalidated,
+            results_stale=self._results_stale,
+            stale_error_reported=self._stale_error_reported,
+        )
+
+    def _write_stale(self, state: StaleState) -> None:
+        self._input_change_invalidated = state.input_change_invalidated
+        self._results_stale = state.results_stale
+        self._stale_error_reported = state.stale_error_reported
+
+    def _clear_outcome_of(self, operation_succeeded: bool) -> None:
+        """انتقال فلگ‌ها پس از یک عملیات که ممکن است پاک‌سازی انجام داده باشد.
+
+        اگر last_clear_ok هنوز None است، یعنی عملیات به مرحلهٔ پاک‌سازی نرسیده،
+        هیچ انتقالی انجام نمی‌شود.
+        """
+        clear_ok = self._actions.last_clear_ok
+        if clear_ok is None:
+            return
+        self._write_stale(self._read_stale().on_clear_attempt(clear_ok, operation_succeeded))
+
+    def _status_is(self, text: str) -> bool:
+        """آیا نوار وضعیت دقیقاً متن موفقیت یک عملیات را دارد؟"""
+        return self.status_var.get() == text
+
+    # ------------------------------------------------------------------
+    # ساخت رابط
+    # ------------------------------------------------------------------
 
     def _configure_style(self) -> None:
         """تنظیم ظاهر پایهٔ رابط کاربری."""
@@ -83,7 +144,7 @@ class MainWindow(tk.Tk):
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
     def _build_toolbar(self) -> None:
-        """ساخت نوار ابزار."""
+        """ساخت نوار ابزار. ذخیره و بارگذاری به wrapperهای MainWindow متصل‌اند."""
         toolbar = ttk.Frame(self, padding=(8, 6))
         toolbar.pack(side=tk.TOP, fill=tk.X)
 
@@ -108,75 +169,111 @@ class MainWindow(tk.Tk):
         ttk.Button(
             toolbar,
             text="ذخیره",
-            command=self._actions.save,
+            command=self._save,
         ).pack(side=tk.LEFT, padx=3)
 
         ttk.Button(
             toolbar,
             text="بارگذاری",
-            command=self._actions.load,
+            command=self._load,
         ).pack(side=tk.LEFT, padx=3)
 
     def set_status(self, message: str) -> None:
         """به‌روزرسانی پیام نوار وضعیت."""
         self.status_var.set(str(message))
 
-    def _on_input_changed(self) -> None:
-        """ابطال نتایج قبلی پس از تغییر واقعی ورودی‌ها.
+    # ------------------------------------------------------------------
+    # تغییر ورودی
+    # ------------------------------------------------------------------
 
-        - اگر مدلی وجود ندارد و پاک‌سازی قبلی ناکام نبوده، هیچ کاری نمی‌کند.
-        - در غیر این صورت مدل را نامعتبر و نتایج را پاک می‌کند.
-        - اگر پاک‌سازی ناکام شود، در تغییر بعدی دوباره تلاش می‌شود.
-        - پیام خطای پاک‌سازی در هر دوره ناکامی فقط یک بار نمایش داده می‌شود.
+    def _on_input_changed(self) -> None:
+        """ابطال نتایج قبلی پس از تغییر واقعی ورودی.
+
+        - اگر StaleState پاک‌سازی لازم نمی‌بیند، هیچ کاری نمی‌شود.
+        - در غیر این صورت مدل نامعتبر و نتایج پاک می‌شوند.
+        - پیام خطای پاک‌سازی فقط در اولین شکست هر دوره نمایش داده می‌شود.
         """
-        if self.current_model is None and not self._results_stale:
+        state = self._read_stale()
+
+        if not state.input_change_needs_clear(self.current_model is not None):
             return
 
         self.current_model = None
-        clear_note = self._actions._clear_results_safely()
+        # باید پیش از انتقال خوانده شود، چون انتقال stale_error_reported را تغییر می‌دهد.
+        should_notify = state.should_notify_clear_failure()
 
-        if clear_note:
-            self._results_stale = True
-            self._input_change_invalidated = True
-            if not self._stale_error_reported:
-                self._stale_error_reported = True
-                self.set_status(
-                    "ورودی تغییر کرد؛ پاک‌سازی نتایج ناکامل بود"
-                )
-                messagebox.showerror(
-                    "تغییر ورودی",
-                    "ورودی‌ها تغییر کردند، اما پاک‌سازی کامل نتایج "
-                    "موفق نبود:" + clear_note,
-                    parent=self,
-                )
-        else:
-            self._reset_invalidation_flags()
-            self._input_change_invalidated = True
-            self.set_status("ورودی تغییر کرد؛ نتایج قبلی پاک شدند")
+        clear_note = self._actions._clear_results_safely()
+        clear_ok = self._actions.last_clear_ok
+
+        self._write_stale(state.on_results_invalidated(clear_ok))
+
+        if clear_ok:
+            self.set_status(_STATUS_INVALIDATED)
+            return
+
+        self.set_status(_STATUS_STALE)
+        if should_notify:
+            messagebox.showerror(
+                "تغییر ورودی",
+                "ورودی‌ها تغییر کردند، اما پاک‌سازی کامل نتایج "
+                "موفق نبود:" + clear_note,
+                parent=self,
+            )
+
+    # ------------------------------------------------------------------
+    # ساخت مدل و تحلیل
+    # ------------------------------------------------------------------
 
     def _on_build_model(self) -> None:
-        """ساخت مدل. فقط در صورت موفقیت، تشخیص تغییر دوباره فعال می‌شود."""
+        """ساخت مدل.
+
+        پیش از عملیات last_clear_ok ریست می‌شود. actions.build_model همیشه
+        پیش از ساخت پاک‌سازی می‌کند، پس نتیجهٔ پاک‌سازی معتبر است.
+        موفقیت فقط با وضعیت «مدل ساخته شد» تشخیص داده می‌شود.
+        """
+        self._actions.last_clear_ok = None
         self._actions.build_model()
-        if self.current_model is not None:
-            self._input_change_invalidated = False
+        built = self._status_is(_STATUS_BUILD_OK)
+        self._clear_outcome_of(operation_succeeded=built)
 
     def _on_analyze(self) -> None:
         """تحلیل.
 
-        - موفق: هر سه پرچم بازنشانی می‌شوند (گزارش تازه نتایج قدیمی را جایگزین کرده است).
-        - ناموفق: وضعیت stale حفظ می‌شود.
+        - موفق: گزارش تازه نتایج قبلی را جایگزین کرده؛ همهٔ فلگ‌ها Reset می‌شوند.
+        - ناموفق: پاک‌سازی (در صورت انجام) بر فلگ‌ها اثر می‌گذارد؛ در غیر این صورت وضعیت حفظ می‌شود.
         """
+        self._actions.last_clear_ok = None
         self._actions.analyze()
-        if self.status_var.get() == _STATUS_ANALYSIS_OK:
-            self._reset_invalidation_flags()
 
-    def _reset_invalidation_flags(self) -> None:
-        self._input_change_invalidated = False
-        self._results_stale = False
-        self._stale_error_reported = False
+        if self._status_is(_STATUS_ANALYSIS_OK):
+            self._write_stale(self._read_stale().on_analysis_succeeded())
+        else:
+            self._clear_outcome_of(operation_succeeded=False)
+
+    # ------------------------------------------------------------------
+    # ذخیره و بارگذاری (wrapperهای اختصاصی)
+    # ------------------------------------------------------------------
+
+    def _save(self) -> None:
+        """ذخیره با wrapper: موفقیت از وضعیت، پاک‌سازی از last_clear_ok جدا بررسی می‌شود."""
+        self._actions.last_clear_ok = None
+        self._actions.save()
+        saved = self._status_is(_STATUS_SAVE_OK)
+        self._clear_outcome_of(operation_succeeded=saved)
+
+    def _load(self) -> None:
+        """بارگذاری با wrapper: موفقیت از وضعیت، پاک‌سازی از last_clear_ok جدا بررسی می‌شود."""
+        self._actions.last_clear_ok = None
+        self._actions.load()
+        loaded = self._status_is(_STATUS_LOAD_OK)
+        self._clear_outcome_of(operation_succeeded=loaded)
+
+    # ------------------------------------------------------------------
+    # پروژه جدید
+    # ------------------------------------------------------------------
 
     def _on_new_project(self) -> None:
-        """تأیید و پاک‌سازی پروژهٔ فعلی. در صورت لغو هیچ تغییری ایجاد نمی‌شود."""
+        """تأیید و پاک‌سازی پروژهٔ فعلی. در لغو هیچ تغییری ایجاد نمی‌شود."""
         try:
             confirmed = messagebox.askyesno(
                 "پروژه جدید",
@@ -189,25 +286,24 @@ class MainWindow(tk.Tk):
             self.input_tabs.clear_form()
             self.current_model = None
             clear_note = self._actions._clear_results_safely()
+            clear_ok = self._actions.last_clear_ok
 
         except Exception as exc:
             self._actions.report_unexpected("پروژه جدید", exc)
             return
 
-        if clear_note:
-            self._results_stale = True
-            self._stale_error_reported = True
-            self._input_change_invalidated = True
-            self.set_status("پروژه جدید؛ پاک‌سازی نتایج ناکامل بود")
-            messagebox.showerror(
-                "پروژه جدید",
-                "فرم پاک شد، اما پاک‌سازی نتایج ناموفق بود:" + clear_note,
-                parent=self,
-            )
-        else:
-            self._reset_invalidation_flags()
-            self._input_change_invalidated = True
-            self.set_status("پروژه جدید")
+        self._write_stale(self._read_stale().on_results_invalidated(clear_ok))
+
+        if clear_ok:
+            self.set_status(_STATUS_NEW_PROJECT)
+            return
+
+        self.set_status(_STATUS_NEW_PROJECT_STALE)
+        messagebox.showerror(
+            "پروژه جدید",
+            "فرم پاک شد، اما پاک‌سازی نتایج ناموفق بود:" + clear_note,
+            parent=self,
+        )
 
 
 def main() -> None:
