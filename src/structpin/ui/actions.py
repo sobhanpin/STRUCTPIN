@@ -2,9 +2,17 @@
 
 مسئولیت:
     - هماهنگ‌کردن دکمه‌های ساخت مدل، تحلیل، ذخیره و بارگذاری بین فرم، سرویس‌ها و ویوها.
-    - تفکیک خطاهای ورودی (ModelBuildError، AnalysisInputError)، خطاهای تحلیل و خطاهای
-      عددی (ArithmeticError) و خطاهای نمایش و خطاهای غیرمنتظره.
-    - بارگذاری transactional: در صورت شکست، فرم قبلی بازگردانده می‌شود و current_model تغییر نمی‌کند.
+    - تفکیک خطاهای ورودی (ModelBuildError، AnalysisInputError)، خطاهای تحلیل، خطاهای
+      عددی (ArithmeticError)، خطاهای نمایش و خطاهای غیرمنتظره.
+    - اعتبارسنجی مشترک عددی گزارش (validate_report_numbers) پیش از نمایش در هر دو ویو.
+    - بارگذاری transactional:
+        * مدل بارگذاری‌شده پیش از دست‌زدن به فرم با قواعد فرم اعتبارسنجی می‌شود.
+        * snapshot فرم گرفته می‌شود و در شکست اعمال، بازگردانی می‌شود.
+        * rollback موفق: نتایج و current_model حفظ می‌شوند و فقط خطای بارگذاری گزارش می‌شود.
+        * rollback ناموفق: نتایج پاک می‌شوند، current_model حفظ می‌شود و هر دو خطا گزارش می‌شوند.
+
+صفت last_clear_ok نتیجهٔ آخرین تلاش پاک‌سازی نتایج را نگه می‌دارد تا MainWindow
+بتواند فلگ‌های stale را بر اساس آن به‌روز کند. actions هیچ فلگی را تغییر نمی‌دهد.
 
 این ماژول هیچ محاسبهٔ مهندسی انجام نمی‌دهد و فایل‌های FEM را import نمی‌کند.
 خطاهای عددی سرویس تحلیل از ArithmeticError ارث می‌برند، بنابراین با گرفتن این کلاس
@@ -23,12 +31,14 @@ from structpin.services.analysis_service import (
     run_frame_analysis,
 )
 from structpin.services.model_builder import ModelBuildError
+from structpin.services.model_builder import build_model as build_structural_model
 from structpin.services.project_io import (
     ProjectFileError,
     load_project,
     model_to_dict,
     save_project,
 )
+from structpin.services.report_validation import validate_report_numbers
 
 if TYPE_CHECKING:
     from structpin.ui.main_window import MainWindow
@@ -69,6 +79,8 @@ class MainWindowActions:
 
     def __init__(self, window: MainWindow) -> None:
         self._window = window
+        # نتیجهٔ آخرین تلاش پاک‌سازی نتایج؛ MainWindow برای به‌روزرسانی فلگ‌ها می‌خواند.
+        self.last_clear_ok: bool = True
 
     # ------------------------------------------------------------------
     # ابزارهای داخلی
@@ -99,11 +111,16 @@ class MainWindowActions:
             raise ClearResultsError(failures)
 
     def _clear_results_safely(self) -> str:
-        """پاک‌سازی نتایج؛ خطا پرتاب نمی‌شود، بلکه متن گزارش خطا برگردانده می‌شود."""
+        """پاک‌سازی نتایج؛ خطا پرتاب نمی‌شود، بلکه متن گزارش خطا برگردانده می‌شود.
+
+        نتیجه در last_clear_ok ثبت می‌شود.
+        """
         try:
             self._clear_results()
         except ClearResultsError as exc:
+            self.last_clear_ok = False
             return "\n" + "\n".join(exc.failures)
+        self.last_clear_ok = True
         return ""
 
     def _analysis_failed(self, status: str, message: str, exc: BaseException) -> None:
@@ -156,7 +173,7 @@ class MainWindowActions:
     # ------------------------------------------------------------------
 
     def analyze(self) -> None:
-        """ساخت مدل از فرم فعلی، تحلیل، و نمایش نتایج.
+        """ساخت مدل از فرم فعلی، تحلیل، اعتبارسنجی عددی و نمایش نتایج.
 
         هر بار مدل از نو ساخته می‌شود. در هر شکست، نتایج قبلی پاک می‌شوند تا گزارش
         قدیمی به‌عنوان نتیجهٔ جدید نمایش داده نشود.
@@ -199,6 +216,7 @@ class MainWindowActions:
             return
 
         try:
+            validate_report_numbers(report)
             window.results_view.show_report(report)
             window.plot_canvas.show_report(report)
         except ValueError as exc:
@@ -273,15 +291,18 @@ class MainWindowActions:
     # ------------------------------------------------------------------
 
     def load(self) -> None:
-        """بارگذاری پروژه و انتقال آن به فرم با امکان بازگردانی.
+        """بارگذاری پروژه و انتقال آن به فرم با اعتبارسنجی و امکان بازگردانی.
 
         ترتیب کار:
             1. انتخاب فایل (لغو = بدون تغییر).
             2. خواندن فایل با load_project.
-            3. snapshot فرم فعلی با get_form_data.
-            4. انتقال model_to_dict(model) به فرم با set_form_data.
-            5. در صورت شکست مرحلهٔ ۴، بازگردانی snapshot با set_form_data.
-            6. فقط پس از موفقیت کامل، current_model تغییر و نتایج پاک می‌شوند.
+            3. تبدیل یک‌باره به دیکشنری فرم با model_to_dict.
+            4. اعتبارسنجی دیکشنری با قواعد فرم (build_model)؛ در شکست، هیچ چیز تغییر نمی‌کند.
+            5. snapshot فرم فعلی با get_form_data.
+            6. اعمال دیکشنری با set_form_data؛ در شکست، بازگردانی snapshot.
+               - بازگردانی موفق: نتایج و current_model حفظ؛ فقط خطای بارگذاری گزارش.
+               - بازگردانی ناموفق: نتایج پاک؛ current_model حفظ؛ هر دو خطا گزارش.
+            7. فقط پس از موفقیت کامل: تنظیم current_model، پاک‌سازی نتایج و پیام موفقیت.
         """
         window = self._window
 
@@ -310,13 +331,32 @@ class MainWindowActions:
             return
 
         try:
+            payload = model_to_dict(model)
+        except Exception as exc:
+            self.report_unexpected("تبدیل مدل بارگذاری‌شده", exc)
+            return
+
+        try:
+            build_structural_model(payload)
+        except ModelBuildError as exc:
+            window.set_status("خطای بارگذاری")
+            self._show_error(
+                "بارگذاری پروژه",
+                f"فایل پروژه با قواعد فرم سازگار نیست؛ بارگذاری انجام نشد:\n{exc}",
+            )
+            return
+        except Exception as exc:
+            self.report_unexpected("اعتبارسنجی پروژه بارگذاری‌شده", exc)
+            return
+
+        try:
             snapshot = window.input_tabs.get_form_data()
         except Exception as exc:
             self.report_unexpected("خواندن فرم فعلی", exc)
             return
 
         try:
-            window.input_tabs.set_form_data(model_to_dict(model))
+            window.input_tabs.set_form_data(payload)
         except Exception as apply_exc:
             self._restore_snapshot(snapshot, apply_exc)
             return
@@ -329,9 +369,11 @@ class MainWindowActions:
     def _restore_snapshot(self, snapshot: dict, apply_exc: BaseException) -> None:
         """بازگردانی فرم به snapshot پس از شکست انتقال داده.
 
-        current_model در این مسیر تغییر نمی‌کند. اگر بازگردانی موفق باشد، نتایج قبلی
-        حفظ می‌شوند. اگر بازگردانی شکست بخورد، فرم ممکن است نامعتبر باشد و نتایج
-        پاک می‌شوند؛ خطای پاک‌سازی به پیام خطا اضافه می‌شود و آن را پنهان نمی‌کند.
+        current_model در این مسیر تغییر نمی‌کند.
+        - بازگردانی موفق: نتایج قبلی حفظ می‌شوند و فقط خطای بارگذاری گزارش می‌شود.
+        - بازگردانی ناموفق: وضعیت فرم نامطمئن است؛ نتایج پاک می‌شوند و هر دو خطا
+          (خطای بارگذاری و خطای بازگردانی) گزارش می‌شوند. خطای پاک‌سازی نیز به پیام
+          الحاق می‌شود و خطای اصلی را پنهان نمی‌کند.
         """
         window = self._window
         try:
@@ -353,4 +395,4 @@ class MainWindowActions:
         self._show_error(
             "بارگذاری پروژه",
             f"فایل پروژه با داده‌های فرم سازگار نبود؛ فرم قبلی بازگردانده شد:\n{apply_exc}",
-)
+                         )
