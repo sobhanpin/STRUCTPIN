@@ -87,15 +87,107 @@ class ValidBuildTest(unittest.TestCase):
         data["restraints"] = None
         self.assertEqual(len(build_model(data).restraints), 0)
 
-    def test_repeated_restraint_on_same_node_is_allowed(self):
+    def test_repeated_restraint_on_same_node_with_same_values_is_allowed(self):
+        """تکرار تکیه‌گاه با مقادیر یکسان پذیرفته می‌شود و فقط یک بار به مدل افزوده می‌شود."""
         data = _valid_frame()
-        data["restraints"].append({"node": 1, "ux": False, "uy": True, "rz": False})
-        self.assertEqual(len(build_model(data).restraints), 2)
+        data["restraints"].append({"node": 1, "ux": True, "uy": True, "rz": True})
+        model = build_model(data)
+        self.assertEqual(len(model.restraints), 1)
+        restraint = model.restraints[0]
+        self.assertEqual(restraint.node, 1)
+        self.assertTrue(restraint.ux)
+        self.assertTrue(restraint.uy)
+        self.assertTrue(restraint.rz)
 
     def test_repeated_nodal_load_on_same_node_is_allowed(self):
         data = _valid_frame()
         data["nodal_loads"].append({"node": 2, "fx": 1.0, "fy": 0.0, "mz": 0.0})
         self.assertEqual(len(build_model(data).nodal_loads), 2)
+
+
+class RestraintPolicyTest(unittest.TestCase):
+    """سیاست تکیه‌گاه: تکرار یکسان پذیرفته، تکرار متناقض با پیام گره و درجه آزادی رد."""
+
+    def _with_extra_restraint(self, **flags):
+        data = _valid_frame()
+        data["restraints"].append({"node": 1, **flags})
+        return data
+
+    def test_conflict_on_ux_is_rejected_with_node_and_dof_in_message(self):
+        data = self._with_extra_restraint(ux=False, uy=True, rz=True)
+        with self.assertRaises(ModelBuildError) as ctx:
+            build_model(data)
+        message = str(ctx.exception)
+        self.assertIn("«1»", message)
+        self.assertIn("«ux»", message)
+        self.assertIn("گره", message)
+        self.assertIn("درجه آزادی", message)
+
+    def test_conflict_on_uy_is_rejected_with_node_and_dof_in_message(self):
+        data = self._with_extra_restraint(ux=True, uy=False, rz=True)
+        with self.assertRaises(ModelBuildError) as ctx:
+            build_model(data)
+        message = str(ctx.exception)
+        self.assertIn("«1»", message)
+        self.assertIn("«uy»", message)
+
+    def test_conflict_on_rz_is_rejected_with_node_and_dof_in_message(self):
+        data = self._with_extra_restraint(ux=True, uy=True, rz=False)
+        with self.assertRaises(ModelBuildError) as ctx:
+            build_model(data)
+        message = str(ctx.exception)
+        self.assertIn("«1»", message)
+        self.assertIn("«rz»", message)
+
+    def test_conflict_reports_row_of_second_occurrence(self):
+        data = self._with_extra_restraint(ux=False, uy=True, rz=True)
+        with self.assertRaises(ModelBuildError) as ctx:
+            build_model(data)
+        self.assertIn("تکیه‌گاه‌ها، ردیف 2", str(ctx.exception))
+
+    def test_conflict_is_detected_when_first_occurrence_is_free(self):
+        """تکیه‌گاه آزاد اول و مقید بعدی روی همان درجه آزادی متناقض است."""
+        data = _valid_frame()
+        data["restraints"] = [
+            {"node": 2, "ux": False, "uy": False, "rz": False},
+            {"node": 2, "ux": True, "uy": False, "rz": False},
+        ]
+        with self.assertRaises(ModelBuildError) as ctx:
+            build_model(data)
+        message = str(ctx.exception)
+        self.assertIn("«2»", message)
+        self.assertIn("«ux»", message)
+
+    def test_fully_free_restraint_is_kept_in_model(self):
+        """گره‌ای که هر سه پرچم آن False است باید به مدل افزوده شود."""
+        data = _valid_frame()
+        data["restraints"].append({"node": 3, "ux": False, "uy": False, "rz": False})
+        model = build_model(data)
+        self.assertEqual(len(model.restraints), 2)
+        free = [r for r in model.restraints if r.node == 3]
+        self.assertEqual(len(free), 1)
+        self.assertFalse(free[0].ux)
+        self.assertFalse(free[0].uy)
+        self.assertFalse(free[0].rz)
+
+    def test_restraint_order_follows_first_appearance_of_node(self):
+        data = _valid_frame()
+        data["restraints"] = [
+            {"node": 3, "ux": False, "uy": False, "rz": False},
+            {"node": 1, "ux": True, "uy": True, "rz": True},
+            {"node": 3, "ux": False, "uy": False, "rz": False},
+        ]
+        model = build_model(data)
+        self.assertEqual([r.node for r in model.restraints], [3, 1])
+
+    def test_identical_repeat_of_free_restraint_is_collapsed(self):
+        data = _valid_frame()
+        data["restraints"] = [
+            {"node": 3, "ux": False, "uy": False, "rz": False},
+            {"node": 3, "ux": False, "uy": False, "rz": False},
+        ]
+        model = build_model(data)
+        self.assertEqual(len([r for r in model.restraints if r.node == 3]), 1)
 
 
 class StringNumericInputTest(unittest.TestCase):
