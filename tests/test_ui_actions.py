@@ -4,6 +4,13 @@
 mockها در محل import واقعی در structpin.ui.actions patch می‌شوند.
 رفتار و متن‌ها از نسخهٔ actions.py استخراج شده‌اند؛ هیچ پیام یا رفتار فرضی نیست.
 
+گزارش‌های تحلیل موفق با AnalysisReport واقعی ساخته می‌شوند تا اعتبارسنجی مشترک
+validate_report_numbers در actions.py روی داده‌های معتبر اجرا شود.
+
+اعتبارسنجی مدل بارگذاری‌شده (build_structural_model در actions) در تست‌های
+مربوط به رفتار transactional با mock جایگزین شده است تا رفتار فرم و نتایج
+به‌صورت مستقل آزموده شود؛ تست مستقل برای شکست آن در LoadTest وجود دارد.
+
 اجرا (ریشهٔ مخزن):
     PYTHONPATH=src python -m unittest discover -s tests -p "test_ui_actions.py" -v
 """
@@ -11,11 +18,32 @@ mockها در محل import واقعی در structpin.ui.actions patch می‌ش
 import unittest
 from unittest import mock
 
-from structpin.services.analysis_service import AnalysisInputError
+from structpin.services.analysis_service import AnalysisInputError, AnalysisReport
 from structpin.services.model_builder import ModelBuildError
 from structpin.services.project_io import ProjectFileError
 from structpin.ui import actions as actions_module
 from structpin.ui.actions import ClearResultsError, MainWindowActions
+
+
+def _valid_report():
+    """گزارش معتبر با ساختار واقعی AnalysisReport (بدون محاسبهٔ مهندسی؛ مقادیر نمونه)."""
+    return AnalysisReport(
+        displacements={1: (0.0, 0.0, 0.0), 2: (0.001, -0.002, 0.0005)},
+        reactions={1: (-10.0, 5.0, 2.5)},
+        member_end_actions={
+            1: ((10.0, 5.0, 0.0), (-10.0, -5.0, 12.5)),
+        },
+        internal_forces={
+            1: {
+                "x": (0.0, 1.0, 2.0),
+                "N": (10.0, 10.0, 10.0),
+                "V": (5.0, 5.0, -5.0),
+                "M": (0.0, 5.0, 0.0),
+            },
+        },
+        n_points=3,
+        warnings=(),
+    )
 
 
 class _FakeInputTabs:
@@ -79,7 +107,7 @@ class _FakeWindow:
 
 
 class _ActionsTestBase(unittest.TestCase):
-    """messagebox، filedialog و توابع سرویس را در محل واقعی import در actions patch می‌کند."""
+    """messagebox و filedialog را در محل واقعی import در actions patch می‌کند."""
 
     def setUp(self):
         self.messagebox = self._patch("messagebox")
@@ -165,16 +193,18 @@ class AnalyzeTest(_ActionsTestBase):
         self.run_analysis = self._patch_service("run_frame_analysis")
 
     def test_success_passes_report_to_both_views_and_reports_success(self):
-        """موفق: گزارش به هر دو ویو، وضعیت «تحلیل انجام شد»، پیام موفقیت."""
+        """موفق: گزارش معتبر AnalysisReport به هر دو ویو می‌رسد، وضعیت «تحلیل انجام شد»، پیام موفقیت."""
         model = object()
-        report = object()
+        report = _valid_report()
         self.run_analysis.return_value = report
         window = _FakeWindow(input_tabs=_FakeInputTabs(model=model))
         self._actions(window).analyze()
         self.run_analysis.assert_called_once_with(model)
         self.assertIs(window.current_model, model)
-        self.assertEqual(window.results_view.show_calls, [report])
-        self.assertEqual(window.plot_canvas.show_calls, [report])
+        self.assertEqual(len(window.results_view.show_calls), 1)
+        self.assertIs(window.results_view.show_calls[0], report)
+        self.assertEqual(len(window.plot_canvas.show_calls), 1)
+        self.assertIs(window.plot_canvas.show_calls[0], report)
         self.assertEqual(window.statuses, ["تحلیل انجام شد"])
         self.messagebox.showinfo.assert_called_once_with(
             "تحلیل سازه", "تحلیل با موفقیت انجام شد.", parent=window
@@ -230,13 +260,21 @@ class AnalyzeTest(_ActionsTestBase):
         self.assertEqual(self.messagebox.showerror.call_count, 1)
 
     def test_results_view_value_error_triggers_display_error_path(self):
-        """شکست results_view.show_report با ValueError: وضعیت «خطای نمایش»، پاک‌سازی هر دو ویو."""
-        self.run_analysis.return_value = object()
+        """شکست results_view.show_report با ValueError: وضعیت «خطای نمایش»، پاک‌سازی هر دو ویو.
+
+        گزارش معتبر است؛ خود show_report توسط mock مسیر خطای ValueError را ایجاد می‌کند.
+        پس از شکست ویوی اول، ویوی دوم نباید نمایش داده شود.
+        """
+        self.run_analysis.return_value = _valid_report()
+        results_view = _FakeView()
+        results_view.show_report = mock.Mock(side_effect=ValueError("جدول بد"))
         window = _FakeWindow(
             input_tabs=_FakeInputTabs(model=object()),
-            results_view=_FakeView(show_error=ValueError("جدول بد")),
+            results_view=results_view,
         )
         self._actions(window).analyze()
+        results_view.show_report.assert_called_once()
+        self.assertEqual(window.plot_canvas.show_calls, [])
         self.assertEqual(window.statuses, ["خطای نمایش"])
         self.assertEqual(window.results_view.clear_calls, 1)
         self.assertEqual(window.plot_canvas.clear_calls, 1)
@@ -244,17 +282,26 @@ class AnalyzeTest(_ActionsTestBase):
         self.assertIn("جدول بد", self.messagebox.showerror.call_args[0][1])
 
     def test_plot_canvas_unexpected_error_clears_and_reports(self):
-        """شکست عمومی plot_canvas.show_report: پاک‌سازی و گزارش خطای غیرمنتظره."""
-        self.run_analysis.return_value = object()
+        """شکست غیر ValueError در plot_canvas.show_report: مسیر «خطای غیرمنتظره» و پاک‌سازی هر دو ویو.
+
+        گزارش معتبر است و results_view آن را پذیرفته؛ خود plot_canvas.show_report
+        توسط mock یک RuntimeError (غیر از ValueError) ایجاد می‌کند.
+        """
+        self.run_analysis.return_value = _valid_report()
+        plot_canvas = _FakeView()
+        plot_canvas.show_report = mock.Mock(side_effect=RuntimeError("نمودار"))
         window = _FakeWindow(
             input_tabs=_FakeInputTabs(model=object()),
-            plot_canvas=_FakeView(show_error=RuntimeError("نمودار")),
+            plot_canvas=plot_canvas,
         )
         self._actions(window).analyze()
+        plot_canvas.show_report.assert_called_once()
+        self.assertEqual(len(window.results_view.show_calls), 1)
         self.assertEqual(window.statuses, ["خطای غیرمنتظره"])
         self.assertEqual(window.results_view.clear_calls, 1)
         self.assertEqual(window.plot_canvas.clear_calls, 1)
         self.assertEqual(self.messagebox.showerror.call_count, 1)
+        self.assertIn("نمودار", self.messagebox.showerror.call_args[0][1])
 
 
 # ----------------------------------------------------------------------
@@ -391,9 +438,14 @@ class LoadTest(_ActionsTestBase):
         super().setUp()
         self.load_project = self._patch_service("load_project")
         self.model_to_dict = self._patch_service("model_to_dict", return_value={"name": "loaded"})
+        # اعتبارسنجی مدل بارگذاری‌شده در actions با build_structural_model انجام می‌شود.
+        # در تست‌های رفتار transactional، این اعتبارسنجی موفق فرض می‌شود؛ شکست آن در تست مستقل آزموده می‌شود.
+        self.build_structural_model = self._patch_service(
+            "build_structural_model", return_value=object()
+        )
 
     def test_success_reads_snapshot_applies_form_and_clears_results(self):
-        """ترتیب: get_form_data (یک بار) پیش از set_form_data (یک بار)؛ سپس مدل و پاک‌سازی."""
+        """ترتیب: model_to_dict، اعتبارسنجی، get_form_data (یک بار)، set_form_data (یک بار)، سپس مدل و پاک‌سازی."""
         loaded = object()
         self.load_project.return_value = loaded
         self.filedialog.askopenfilename.return_value = "/tmp/p.structpin"
@@ -402,6 +454,7 @@ class LoadTest(_ActionsTestBase):
         self._actions(window).load()
         self.load_project.assert_called_once_with("/tmp/p.structpin")
         self.model_to_dict.assert_called_once_with(loaded)
+        self.build_structural_model.assert_called_once_with({"name": "loaded"})
         self.assertEqual(tabs.get_calls, 1)
         self.assertEqual(tabs.set_calls, [{"name": "loaded"}])
         self.assertIs(window.current_model, loaded)
@@ -412,6 +465,85 @@ class LoadTest(_ActionsTestBase):
             "بارگذاری پروژه", "پروژه با موفقیت بارگذاری شد.", parent=window
         )
 
+    def test_validation_runs_with_exact_payload_before_form_is_touched(self):
+        """payload دقیقاً خروجی model_to_dict است و اعتبارسنجی پیش از get_form_data و set_form_data اجرا می‌شود."""
+        loaded = object()
+        payload = {"name": "loaded", "materials": [{"name": "فولاد", "E": 200.0}]}
+        self.model_to_dict.return_value = payload
+        self.load_project.return_value = loaded
+        self.filedialog.askopenfilename.return_value = "/tmp/p.structpin"
+
+        order = []
+        tabs = _FakeInputTabs(form={"name": "old"})
+        original_get = tabs.get_form_data
+        original_set = tabs.set_form_data
+
+        def tracked_get():
+            order.append("get_form_data")
+            return original_get()
+
+        def tracked_set(data):
+            order.append("set_form_data")
+            return original_set(data)
+
+        tabs.get_form_data = tracked_get
+        tabs.set_form_data = tracked_set
+        self.build_structural_model.side_effect = lambda data: order.append("validate") or object()
+
+        window = _FakeWindow(input_tabs=tabs, current_model=object())
+        self._actions(window).load()
+
+        self.build_structural_model.assert_called_once_with(payload)
+        self.assertEqual(order, ["validate", "get_form_data", "set_form_data"])
+        self.assertEqual(tabs.set_calls, [payload])
+
+    def test_validation_failure_touches_nothing(self):
+        """build_structural_model با ModelBuildError شکست می‌خورد.
+
+        get_form_data و set_form_data صفر بار فراخوانی شوند، current_model و نتایج
+        دست‌نخورده بمانند، و پیام خطای اعتبارسنجی نمایش داده شود.
+        """
+        self.load_project.return_value = object()
+        self.filedialog.askopenfilename.return_value = "/tmp/p.structpin"
+        self.build_structural_model.side_effect = ModelBuildError("تکیه‌گاه متناقض روی گره «1»")
+        tabs = _FakeInputTabs(form={"name": "old"})
+        old_model = object()
+        window = _FakeWindow(input_tabs=tabs, current_model=old_model)
+
+        self._actions(window).load()
+
+        self.assertEqual(tabs.get_calls, 0)
+        self.assertEqual(tabs.set_calls, [])
+        self.assertEqual(tabs.form, {"name": "old"})
+        self.assertIs(window.current_model, old_model)
+        self.assertEqual(window.results_view.clear_calls, 0)
+        self.assertEqual(window.plot_canvas.clear_calls, 0)
+        self.assertEqual(window.statuses, ["خطای بارگذاری"])
+        self.messagebox.showerror.assert_called_once()
+        title, message = self.messagebox.showerror.call_args[0]
+        self.assertEqual(title, "بارگذاری پروژه")
+        self.assertIn("قواعد فرم", message)
+        self.assertIn("تکیه‌گاه متناقض روی گره «1»", message)
+        self.messagebox.showinfo.assert_not_called()
+
+    def test_unexpected_validation_error_touches_nothing_and_reports(self):
+        """خطای غیرمنتظره در اعتبارسنجی: فرم و نتایج دست‌نخورده، وضعیت «خطای غیرمنتظره»."""
+        self.load_project.return_value = object()
+        self.filedialog.askopenfilename.return_value = "/tmp/p.structpin"
+        self.build_structural_model.side_effect = RuntimeError("ناشناخته")
+        tabs = _FakeInputTabs(form={"name": "old"})
+        old_model = object()
+        window = _FakeWindow(input_tabs=tabs, current_model=old_model)
+
+        self._actions(window).load()
+
+        self.assertEqual(tabs.get_calls, 0)
+        self.assertEqual(tabs.set_calls, [])
+        self.assertIs(window.current_model, old_model)
+        self.assertEqual(window.results_view.clear_calls, 0)
+        self.assertEqual(window.statuses, ["خطای غیرمنتظره"])
+        self.assertIn("ناشناخته", self.messagebox.showerror.call_args[0][1])
+
     def test_cancel_changes_nothing_and_does_not_read_form(self):
         self.filedialog.askopenfilename.return_value = ""
         tabs = _FakeInputTabs()
@@ -419,6 +551,7 @@ class LoadTest(_ActionsTestBase):
         window = _FakeWindow(input_tabs=tabs, current_model=old_model)
         self._actions(window).load()
         self.load_project.assert_not_called()
+        self.build_structural_model.assert_not_called()
         self.assertEqual(tabs.get_calls, 0)
         self.assertEqual(tabs.set_calls, [])
         self.assertIs(window.current_model, old_model)
@@ -431,6 +564,7 @@ class LoadTest(_ActionsTestBase):
         old_model = object()
         window = _FakeWindow(input_tabs=tabs, current_model=old_model)
         self._actions(window).load()
+        self.build_structural_model.assert_not_called()
         self.assertEqual(tabs.get_calls, 0)
         self.assertEqual(tabs.set_calls, [])
         self.assertIs(window.current_model, old_model)
