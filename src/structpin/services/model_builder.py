@@ -27,6 +27,18 @@
     متن (نام‌ها):
         فقط str غیرخالی پس از strip.
 
+قواعد تکرار:
+    تکیه‌گاه:
+        - تکرار با مقدار یکسان روی (node, dof): پذیرفته؛ فقط یک بار به مدل افزوده می‌شود.
+        - تکرار با مقدار متناقض روی (node, dof): رد با ModelBuildError.
+        - ترتیب افزودن: ترتیب اولین حضور هر گره در ورودی.
+        - گره‌ای که در ورودی آمده ولی هر سه پرچم آن False است، به مدل افزوده می‌شود.
+    بار گره‌ای و بار گسترده:
+        - تکرار مجاز است و موتور آن‌ها را جمع می‌کند (معنای فیزیکی: بارهای هم‌راستا).
+    بار گسترده:
+        - همیشه روی تمام طول عضو اعمال می‌شود. بار جزئی (روی بخشی از عضو) پشتیبانی نمی‌شود.
+          (ثبت در KNOWN_LIMITATIONS.md)
+
 خروجی:
     StructuralModel (بدون اعتبارسنجی هندسی کامل؛ آن بر عهدهٔ solve_frame است)
 
@@ -42,7 +54,6 @@
 """
 
 import math
-from numbers import Real
 
 from structpin.model.structural_model import ModelError, StructuralModel
 
@@ -70,6 +81,8 @@ _SECTION_LABELS = {
     "nodal_loads": "بارهای گرهی",
     "member_udls": "بارهای گسترده",
 }
+
+_DOF_LABELS = {"ux": "ux", "uy": "uy", "rz": "rz"}
 
 
 def _fail(section, row, message):
@@ -176,11 +189,62 @@ def _wrap_model_error(section, row, exc):
     _fail(section, row, f"داده نامعتبر یا تکراری: {exc}")
 
 
+def _add_restraints(model, items, node_ids):
+    """افزودن تکیه‌گاه‌ها با سیاست تکرار.
+
+    هر (node, dof) فقط یک مقدار دارد. تکرار با مقدار یکسان بی‌صدا پذیرفته و
+    نادیده گرفته می‌شود؛ تکرار با مقدار متناقض رد می‌شود.
+
+    ترتیب افزودن به مدل، ترتیب اولین حضور هر گره در ورودی است (بدون مرتب‌سازی).
+    گره‌ای که در ورودی آمده باشد حتی اگر هر سه پرچم آن False باشد به مدل افزوده می‌شود.
+    """
+    seen = {}
+    node_order = {}
+
+    for idx, item in enumerate(items, start=1):
+        _require_mapping(item, "restraints", idx)
+        node = _as_int(_get(item, "node", "restraints", idx), "node", "restraints", idx)
+        if node not in node_ids:
+            _fail("restraints", idx, f"گره «{node}» در بخش گره‌ها تعریف نشده است")
+
+        if node not in node_order:
+            node_order[node] = len(node_order)
+
+        flags = {
+            "ux": _as_bool(_get(item, "ux", "restraints", idx), "ux", "restraints", idx),
+            "uy": _as_bool(_get(item, "uy", "restraints", idx), "uy", "restraints", idx),
+            "rz": _as_bool(_get(item, "rz", "restraints", idx), "rz", "restraints", idx),
+        }
+
+        for dof, value in flags.items():
+            key = (node, dof)
+            if key in seen:
+                if seen[key] != value:
+                    _fail(
+                        "restraints",
+                        idx,
+                        f"تکیه‌گاه متناقض روی گره «{node}» و درجه آزادی «{_DOF_LABELS[dof]}»: "
+                        f"قبلاً «{'بله' if seen[key] else 'خیر'}» و اکنون "
+                        f"«{'بله' if value else 'خیر'}» تعریف شده است",
+                    )
+            seen[key] = value
+
+    restrained_nodes = {}
+    for (node, dof), value in seen.items():
+        restrained_nodes.setdefault(node, {"ux": False, "uy": False, "rz": False})
+        restrained_nodes[node][dof] = value
+
+    for node in node_order:
+        flags = restrained_nodes[node]
+        model.add_restraint(node, ux=flags["ux"], uy=flags["uy"], rz=flags["rz"])
+
+
 def build_model(data):
     """ساخت StructuralModel از دیکشنری فرم.
 
     Raises:
-        ModelBuildError: داده‌های ورودی نامعتبر، ناقص، با نوع نادرست، یا ارجاع ناموجود.
+        ModelBuildError: داده‌های ورودی نامعتبر، ناقص، با نوع نادرست، ارجاع ناموجود،
+            یا تکیه‌گاه متناقض.
     """
     if not isinstance(data, dict):
         raise ModelBuildError("ورودی باید یک دیکشنری (شیء) باشد")
@@ -253,18 +317,10 @@ def build_model(data):
             _wrap_model_error("members", idx, exc)
         member_ids.add(member_id)
 
-    # ---- تکیه‌گاه‌ها ----
-    for idx, item in enumerate(_section_list(data, "restraints"), start=1):
-        _require_mapping(item, "restraints", idx)
-        node = _as_int(_get(item, "node", "restraints", idx), "node", "restraints", idx)
-        if node not in node_ids:
-            _fail("restraints", idx, f"گره «{node}» در بخش گره‌ها تعریف نشده است")
-        ux = _as_bool(_get(item, "ux", "restraints", idx), "ux", "restraints", idx)
-        uy = _as_bool(_get(item, "uy", "restraints", idx), "uy", "restraints", idx)
-        rz = _as_bool(_get(item, "rz", "restraints", idx), "rz", "restraints", idx)
-        model.add_restraint(node, ux=ux, uy=uy, rz=rz)
+    # ---- تکیه‌گاه‌ها (با سیاست تکرار) ----
+    _add_restraints(model, _section_list(data, "restraints"), node_ids)
 
-    # ---- بارهای گرهی ----
+    # ---- بارهای گرهی (تکرار مجاز؛ موتور جمع می‌کند) ----
     for idx, item in enumerate(_section_list(data, "nodal_loads"), start=1):
         _require_mapping(item, "nodal_loads", idx)
         node = _as_int(_get(item, "node", "nodal_loads", idx), "node", "nodal_loads", idx)
@@ -275,7 +331,7 @@ def build_model(data):
         mz = _as_finite_number(_get(item, "mz", "nodal_loads", idx), "mz", "nodal_loads", idx)
         model.add_nodal_load(node, fx=fx, fy=fy, mz=mz)
 
-    # ---- بارهای گسترده ----
+    # ---- بارهای گسترده (تکرار مجاز؛ همیشه روی تمام طول عضو) ----
     for idx, item in enumerate(_section_list(data, "member_udls"), start=1):
         _require_mapping(item, "member_udls", idx)
         member = _as_int(_get(item, "member", "member_udls", idx), "member", "member_udls", idx)
