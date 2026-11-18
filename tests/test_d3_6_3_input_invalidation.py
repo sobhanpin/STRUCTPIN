@@ -1,11 +1,15 @@
-"""تست‌های D3-6.3: نامعتبرشدن نتایج پس از تغییر واقعی ورودی.
+"""تست‌های D3-6.3 و D3-7: نامعتبرشدن نتایج و انتقال فلگ‌های stale در MainWindow.
 
-- MainWindowInvalidationTest: منطق MainWindow با FakeWindow و MainWindowActions واقعی.
-  به نمایشگر نیاز ندارد؛ messagebox و run_frame_analysis با mock جایگزین شده‌اند.
-  گزارش‌های تحلیل موفق، AnalysisReport معتبر هستند تا اعتبارسنجی مشترک
-  validate_report_numbers در actions روی داده واقعی اجرا شود.
+- MainWindowInvalidationTest: منطق MainWindow با _FakeWindow و MainWindowActions واقعی.
+  توابع MainWindow روی _FakeWindow به‌عنوان ویژگی کلاس قرار می‌گیرند. هیچ پنجره Tk ساخته
+  نمی‌شود؛ messagebox، filedialog و توابع سرویس با mock جایگزین شده‌اند. headless است.
+- SaveLoadWrapperTest: wrapperهای _save و _load با actions واقعی. headless است.
+- ToolbarWiringTest: بررسی منبع _build_toolbar. headless است.
 - InputTabsCallbackTest: کد واقعی InputTabs با Tk. بدون نمایشگر کل کلاس SkipTest می‌دهد.
   Skip موفقیت حساب نمی‌شود.
+
+گزارش‌های تحلیل موفق AnalysisReport معتبر هستند تا اعتبارسنجی مشترک
+validate_report_numbers در actions روی داده واقعی اجرا شود.
 
 اجرا (ریشهٔ مخزن):
     $env:PYTHONPATH="src"; python -m unittest discover -s tests -p "test_d3_6_3_input_invalidation.py" -v
@@ -17,6 +21,8 @@ import unittest
 from unittest import mock
 
 from structpin.services.analysis_service import AnalysisInputError, AnalysisReport
+from structpin.services.model_builder import ModelBuildError
+from structpin.services.project_io import ProjectFileError
 from structpin.ui import actions as actions_module
 from structpin.ui import main_window as main_window_module
 from structpin.ui.actions import MainWindowActions
@@ -25,6 +31,9 @@ from structpin.ui.main_window import MainWindow
 _STATUS_INVALIDATED = "ورودی تغییر کرد؛ نتایج قبلی پاک شدند"
 _STATUS_STALE = "ورودی تغییر کرد؛ پاک‌سازی نتایج ناکامل بود"
 _STATUS_ANALYSIS_OK = "تحلیل انجام شد"
+_STATUS_BUILD_OK = "مدل ساخته شد"
+_STATUS_SAVE_OK = "پروژه ذخیره شد"
+_STATUS_LOAD_OK = "پروژه بارگذاری شد"
 _STATUS_NEW_PROJECT = "پروژه جدید"
 _STATUS_NEW_PROJECT_STALE = "پروژه جدید؛ پاک‌سازی نتایج ناکامل بود"
 
@@ -47,6 +56,20 @@ def _valid_report():
         },
         n_points=3,
         warnings=(),
+    )
+
+
+def _set_flags(window, value):
+    window._input_change_invalidated = value
+    window._results_stale = value
+    window._stale_error_reported = value
+
+
+def _flags(window):
+    return (
+        window._input_change_invalidated,
+        window._results_stale,
+        window._stale_error_reported,
     )
 
 
@@ -81,18 +104,56 @@ class _FakeView:
 
 
 class _FakeInputTabs:
-    def __init__(self, model=None):
+    """فرم ساختگی. set_errors به ترتیب برای هر فراخوانی set_form_data مصرف می‌شود."""
+
+    def __init__(self, model=None, build_error=None, form=None, set_errors=None):
         self.model = model
+        self.build_error = build_error
+        self.form = dict(form) if form is not None else {"name": "old"}
+        self.set_errors = list(set_errors or [])
         self.clear_form_calls = 0
+        self.get_calls = 0
+        self.set_calls = []
 
     def build_model(self):
+        if self.build_error is not None:
+            raise self.build_error
         return self.model
+
+    def get_form_data(self):
+        self.get_calls += 1
+        return dict(self.form)
+
+    def set_form_data(self, data):
+        self.set_calls.append(data)
+        if self.set_errors:
+            error = self.set_errors.pop(0)
+            if error is not None:
+                raise error
+        self.form = dict(data)
 
     def clear_form(self):
         self.clear_form_calls += 1
 
 
 class _FakeWindow:
+    """شیء ساختگی به‌جای MainWindow.
+
+    توابع MainWindow به‌عنوان ویژگی کلاس قرار گرفته‌اند تا روی این شیء اجرا شوند.
+    MainWindowActions واقعی روی همین شیء کار می‌کند.
+    """
+
+    _read_stale = MainWindow._read_stale
+    _write_stale = MainWindow._write_stale
+    _clear_outcome_of = MainWindow._clear_outcome_of
+    _status_is = MainWindow._status_is
+    _save = MainWindow._save
+    _load = MainWindow._load
+    _on_input_changed = MainWindow._on_input_changed
+    _on_build_model = MainWindow._on_build_model
+    _on_analyze = MainWindow._on_analyze
+    _on_new_project = MainWindow._on_new_project
+
     def __init__(self, input_tabs=None, results_view=None, plot_canvas=None):
         self.current_model = None
         self.input_tabs = input_tabs if input_tabs is not None else _FakeInputTabs(model=object())
@@ -107,18 +168,26 @@ class _FakeWindow:
     def set_status(self, text):
         self.status_var.set(text)
 
-    def _reset_invalidation_flags(self):
-        self._input_change_invalidated = False
-        self._results_stale = False
-        self._stale_error_reported = False
-
 
 class _Base(unittest.TestCase):
     def setUp(self):
         self.askyesno = self._patch(main_window_module.messagebox, "askyesno", return_value=True)
         self.showerror = self._patch(main_window_module.messagebox, "showerror")
         self.showinfo = self._patch(actions_module.messagebox, "showinfo")
-        self.run_analysis = self._patch(actions_module, "run_frame_analysis", return_value=_valid_report())
+        self.run_analysis = self._patch(
+            actions_module, "run_frame_analysis", return_value=_valid_report()
+        )
+        self.save_project = self._patch(actions_module, "save_project")
+        self.load_project = self._patch(actions_module, "load_project", return_value=object())
+        self.model_to_dict = self._patch(
+            actions_module, "model_to_dict", return_value={"name": "loaded"}
+        )
+        self.build_structural_model = self._patch(
+            actions_module, "build_structural_model", return_value=object()
+        )
+        self.filedialog = self._patch(actions_module, "filedialog")
+        self.filedialog.asksaveasfilename.return_value = "/tmp/p.structpin"
+        self.filedialog.askopenfilename.return_value = "/tmp/p.structpin"
 
     def _patch(self, target, name, **kwargs):
         patcher = mock.patch.object(target, name, **kwargs)
@@ -127,12 +196,17 @@ class _Base(unittest.TestCase):
         return mocked
 
 
+# ----------------------------------------------------------------------
+# منطق تغییر ورودی، پروژه جدید، ساخت و تحلیل
+# ----------------------------------------------------------------------
+
+
 class MainWindowInvalidationTest(_Base):
 
     def test_first_change_with_model_invalidates_and_clears_both_views(self):
         window = _FakeWindow()
         window.current_model = object()
-        MainWindow._on_input_changed(window)
+        window._on_input_changed()
         self.assertIsNone(window.current_model)
         self.assertEqual(window.results_view.clear_calls, 1)
         self.assertEqual(window.plot_canvas.clear_calls, 1)
@@ -141,7 +215,7 @@ class MainWindowInvalidationTest(_Base):
 
     def test_first_change_without_model_or_stale_does_nothing(self):
         window = _FakeWindow()
-        MainWindow._on_input_changed(window)
+        window._on_input_changed()
         self.assertEqual(window.results_view.clear_calls, 0)
         self.assertEqual(window.plot_canvas.clear_calls, 0)
         self.assertEqual(window.status_var.get(), "آماده")
@@ -150,20 +224,20 @@ class MainWindowInvalidationTest(_Base):
     def test_later_changes_after_successful_clear_do_not_clear_again(self):
         window = _FakeWindow()
         window.current_model = object()
-        MainWindow._on_input_changed(window)
-        MainWindow._on_input_changed(window)
-        MainWindow._on_input_changed(window)
+        window._on_input_changed()
+        window._on_input_changed()
+        window._on_input_changed()
         self.assertEqual(window.results_view.clear_calls, 1)
         self.assertEqual(window.plot_canvas.clear_calls, 1)
 
     def test_failed_clear_is_retried_on_next_change(self):
         window = _FakeWindow(results_view=_FakeView(clear_errors=[RuntimeError("قفل")]))
         window.current_model = object()
-        MainWindow._on_input_changed(window)
+        window._on_input_changed()
         self.assertTrue(window._results_stale)
         self.assertEqual(window.status_var.get(), _STATUS_STALE)
 
-        MainWindow._on_input_changed(window)
+        window._on_input_changed()
         self.assertEqual(window.results_view.clear_calls, 2)
         self.assertFalse(window._results_stale)
         self.assertEqual(window.status_var.get(), _STATUS_INVALIDATED)
@@ -173,9 +247,9 @@ class MainWindowInvalidationTest(_Base):
             clear_errors=[RuntimeError("قفل"), RuntimeError("قفل"), RuntimeError("قفل")]
         ))
         window.current_model = object()
-        MainWindow._on_input_changed(window)
-        MainWindow._on_input_changed(window)
-        MainWindow._on_input_changed(window)
+        window._on_input_changed()
+        window._on_input_changed()
+        window._on_input_changed()
         self.assertEqual(window.results_view.clear_calls, 3)
         self.assertEqual(self.showerror.call_count, 1)
         self.assertEqual(window.status_var.get(), _STATUS_STALE)
@@ -186,16 +260,16 @@ class MainWindowInvalidationTest(_Base):
             clear_errors=[RuntimeError("اول"), None, None, RuntimeError("دوم")]
         ))
         window.current_model = object()
-        MainWindow._on_input_changed(window)
+        window._on_input_changed()
         self.assertEqual(self.showerror.call_count, 1)
 
-        MainWindow._on_input_changed(window)
+        window._on_input_changed()
         self.assertFalse(window._stale_error_reported)
 
-        MainWindow._on_build_model(window)
+        window._on_build_model()
         self.assertIsNotNone(window.current_model)
 
-        MainWindow._on_input_changed(window)
+        window._on_input_changed()
         self.assertEqual(self.showerror.call_count, 2)
 
     def test_new_project_cancel_changes_nothing(self):
@@ -203,81 +277,260 @@ class MainWindowInvalidationTest(_Base):
         window = _FakeWindow()
         model = object()
         window.current_model = model
-        MainWindow._on_new_project(window)
+        _set_flags(window, True)
+        window._on_new_project()
         self.assertIs(window.current_model, model)
         self.assertEqual(window.input_tabs.clear_form_calls, 0)
         self.assertEqual(window.results_view.clear_calls, 0)
         self.assertEqual(window.plot_canvas.clear_calls, 0)
+        self.assertEqual(_flags(window), (True, True, True))
 
     def test_new_project_success_clears_form_model_and_views(self):
         window = _FakeWindow()
         window.current_model = object()
-        MainWindow._on_new_project(window)
+        window._on_new_project()
         self.assertEqual(window.input_tabs.clear_form_calls, 1)
         self.assertIsNone(window.current_model)
         self.assertEqual(window.results_view.clear_calls, 1)
         self.assertEqual(window.plot_canvas.clear_calls, 1)
         self.assertEqual(window.status_var.get(), _STATUS_NEW_PROJECT)
+        self.assertEqual(_flags(window), (True, False, False))
         self.showerror.assert_not_called()
 
     def test_new_project_clear_failure_reports_once_and_marks_stale(self):
         window = _FakeWindow(results_view=_FakeView(clear_errors=[RuntimeError("قفل")]))
         window.current_model = object()
-        MainWindow._on_new_project(window)
+        window._on_new_project()
         self.assertIsNone(window.current_model)
         self.assertTrue(window._results_stale)
         self.assertEqual(window.status_var.get(), _STATUS_NEW_PROJECT_STALE)
         self.assertEqual(self.showerror.call_count, 1)
 
-    def test_save_and_load_buttons_use_real_action_names(self):
+    def test_save_and_load_buttons_are_wired_to_main_window_wrappers(self):
+        """این تست به‌روزشده است: دکمه‌ها به wrapperهای _save و _load متصل‌اند، نه مستقیم به actions."""
         source = inspect.getsource(MainWindow._build_toolbar)
-        self.assertIn("command=self._actions.save,", source)
-        self.assertIn("command=self._actions.load,", source)
+        self.assertIn("command=self._save,", source)
+        self.assertIn("command=self._load,", source)
+        self.assertNotIn("self._actions.save", source)
+        self.assertNotIn("self._actions.load", source)
         self.assertNotIn("save_project", source)
         self.assertNotIn("load_project", source)
 
     def test_successful_analyze_after_stale_failure_resets_all_flags(self):
-        """تحلیل موفق با گزارش معتبر AnalysisReport پس از شکست stale.
-
-        گزارش معتبر از run_frame_analysis برمی‌گردد، از validate_report_numbers
-        عبور می‌کند و به results_view.show_report می‌رسد. سپس هر سه فلگ بازنشانی می‌شوند.
-        """
+        """تحلیل موفق با گزارش معتبر پس از شکست stale: گزارش به ویو می‌رسد و هر سه فلگ Reset می‌شوند."""
         report = _valid_report()
         self.run_analysis.return_value = report
         window = _FakeWindow(input_tabs=_FakeInputTabs(model=object()))
         window._results_stale = True
         window._stale_error_reported = True
         window._input_change_invalidated = True
-        MainWindow._on_analyze(window)
+        window._on_analyze()
         self.assertEqual(len(window.results_view.show_calls), 1)
         self.assertIs(window.results_view.show_calls[0], report)
         self.assertEqual(window.status_var.get(), _STATUS_ANALYSIS_OK)
-        self.assertFalse(window._results_stale)
-        self.assertFalse(window._stale_error_reported)
-        self.assertFalse(window._input_change_invalidated)
+        self.assertEqual(_flags(window), (False, False, False))
 
     def test_failed_analyze_keeps_stale_flags(self):
         self.run_analysis.side_effect = AnalysisInputError("ناپایدار")
         window = _FakeWindow(input_tabs=_FakeInputTabs(model=object()))
         window._results_stale = True
         window._stale_error_reported = True
-        MainWindow._on_analyze(window)
+        window._on_analyze()
         self.assertNotEqual(window.status_var.get(), _STATUS_ANALYSIS_OK)
         self.assertTrue(window._results_stale)
         self.assertTrue(window._stale_error_reported)
 
     def test_successful_build_only_rearms_change_detection(self):
-        # توجه: این تست هنوز انتظار رفتار قبلی (حفظ فلگ‌های stale پس از ساخت موفق) را دارد.
-        # طبق تصمیم تأییدشده، با جایگزینی main_window.py این انتظار باید به رفتار جدید تغییر کند.
+        """ساخت موفق همراه با پاک‌سازی موفق: هر سه فلگ Reset می‌شوند.
+
+        این تست به‌روزشده است. انتظار قدیمی (حفظ results_stale و stale_error_reported
+        پس از ساخت موفق) با تصمیم تأییدشده جایگزین شد.
+        """
         window = _FakeWindow(input_tabs=_FakeInputTabs(model=object()))
-        window._results_stale = True
-        window._stale_error_reported = True
-        window._input_change_invalidated = True
-        MainWindow._on_build_model(window)
+        _set_flags(window, True)
+        window._on_build_model()
         self.assertIsNotNone(window.current_model)
-        self.assertFalse(window._input_change_invalidated)
-        self.assertTrue(window._results_stale)
-        self.assertTrue(window._stale_error_reported)
+        self.assertEqual(window.status_var.get(), _STATUS_BUILD_OK)
+        self.assertEqual(_flags(window), (False, False, False))
+
+    def test_build_with_clear_failure_marks_stale_and_keeps_success_status(self):
+        """ساخت موفق اما پاک‌سازی ناموفق: وضعیت stale ثبت می‌شود و موفقیت ساخت پنهان نمی‌شود."""
+        window = _FakeWindow(
+            input_tabs=_FakeInputTabs(model=object()),
+            results_view=_FakeView(clear_errors=[RuntimeError("جدول قفل")]),
+        )
+        window._on_build_model()
+        self.assertIsNotNone(window.current_model)
+        self.assertEqual(window.status_var.get(), _STATUS_BUILD_OK)
+        self.assertEqual(_flags(window), (True, True, True))
+
+    def test_build_failure_after_clear_success_keeps_flags(self):
+        """شکست ساخت پس از پاک‌سازی موفق: فلگ‌ها بدون تغییر می‌مانند."""
+        window = _FakeWindow(input_tabs=_FakeInputTabs(build_error=ModelBuildError("بد")))
+        _set_flags(window, True)
+        window._on_build_model()
+        self.assertIsNone(window.current_model)
+        self.assertEqual(window.status_var.get(), "خطای ورودی")
+        self.assertEqual(_flags(window), (True, True, True))
+
+
+# ----------------------------------------------------------------------
+# wrapperهای ذخیره و بارگذاری (headless)
+# ----------------------------------------------------------------------
+
+
+class SaveWrapperTest(_Base):
+
+    def test_save_cancel_keeps_flags_and_clears_nothing(self):
+        self.filedialog.asksaveasfilename.return_value = ""
+        window = _FakeWindow(input_tabs=_FakeInputTabs(model=object()))
+        _set_flags(window, True)
+        window._save()
+        self.assertEqual(window.status_var.get(), "ذخیره لغو شد")
+        self.assertEqual(_flags(window), (True, True, True))
+        self.assertEqual(window.results_view.clear_calls, 0)
+        self.assertEqual(window.plot_canvas.clear_calls, 0)
+        self.assertIsNone(window._actions.last_clear_ok)
+        self.save_project.assert_not_called()
+
+    def test_save_cancel_ignores_previous_clear_outcome(self):
+        """مقدار قدیمی last_clear_ok نباید به‌عنوان نتیجهٔ عملیات جدید تفسیر شود."""
+        self.filedialog.asksaveasfilename.return_value = ""
+        window = _FakeWindow(input_tabs=_FakeInputTabs(model=object()))
+        window._actions.last_clear_ok = False
+        window._save()
+        self.assertEqual(_flags(window), (False, False, False))
+
+    def test_save_build_failure_before_clear_keeps_flags(self):
+        window = _FakeWindow(input_tabs=_FakeInputTabs(build_error=ModelBuildError("بد")))
+        _set_flags(window, True)
+        window._save()
+        self.assertEqual(window.status_var.get(), "ذخیره انجام نشد")
+        self.assertEqual(_flags(window), (True, True, True))
+        self.assertEqual(window.results_view.clear_calls, 0)
+        self.filedialog.asksaveasfilename.assert_not_called()
+
+    def test_save_write_failure_before_clear_keeps_flags(self):
+        self.save_project.side_effect = ProjectFileError("نوشتن ممکن نیست")
+        window = _FakeWindow(input_tabs=_FakeInputTabs(model=object()))
+        _set_flags(window, True)
+        window._save()
+        self.assertEqual(window.status_var.get(), "خطای ذخیره")
+        self.assertEqual(_flags(window), (True, True, True))
+        self.assertEqual(window.results_view.clear_calls, 0)
+
+    def test_save_success_with_clear_success_resets_all_flags(self):
+        model = object()
+        window = _FakeWindow(input_tabs=_FakeInputTabs(model=model))
+        _set_flags(window, True)
+        window._save()
+        self.save_project.assert_called_once_with(model, "/tmp/p.structpin")
+        self.assertIs(window.current_model, model)
+        self.assertEqual(window.status_var.get(), _STATUS_SAVE_OK)
+        self.assertEqual(window.results_view.clear_calls, 1)
+        self.assertEqual(_flags(window), (False, False, False))
+
+    def test_save_success_with_clear_failure_marks_stale_and_keeps_success_message(self):
+        window = _FakeWindow(
+            input_tabs=_FakeInputTabs(model=object()),
+            results_view=_FakeView(clear_errors=[RuntimeError("جدول قفل")]),
+        )
+        window._save()
+        self.assertEqual(window.status_var.get(), _STATUS_SAVE_OK)
+        self.assertEqual(_flags(window), (True, True, True))
+        self.showinfo.assert_called_once()
+        message = self.showinfo.call_args[0][1]
+        self.assertIn("با موفقیت ذخیره شد", message)
+        self.assertIn("جدول قفل", message)
+
+
+class LoadWrapperTest(_Base):
+
+    def test_load_cancel_keeps_flags_and_clears_nothing(self):
+        self.filedialog.askopenfilename.return_value = ""
+        tabs = _FakeInputTabs()
+        window = _FakeWindow(input_tabs=tabs)
+        _set_flags(window, True)
+        window._load()
+        self.assertEqual(window.status_var.get(), "بارگذاری لغو شد")
+        self.assertEqual(_flags(window), (True, True, True))
+        self.assertEqual(window.results_view.clear_calls, 0)
+        self.assertEqual(tabs.get_calls, 0)
+        self.assertIsNone(window._actions.last_clear_ok)
+
+    def test_load_cancel_ignores_previous_clear_outcome(self):
+        """مقدار قدیمی last_clear_ok نباید به‌عنوان نتیجهٔ عملیات جدید تفسیر شود."""
+        self.filedialog.askopenfilename.return_value = ""
+        window = _FakeWindow(input_tabs=_FakeInputTabs())
+        window._actions.last_clear_ok = False
+        window._load()
+        self.assertEqual(_flags(window), (False, False, False))
+
+    def test_load_project_failure_before_clear_keeps_flags(self):
+        self.load_project.side_effect = ProjectFileError("خراب")
+        tabs = _FakeInputTabs()
+        window = _FakeWindow(input_tabs=tabs)
+        _set_flags(window, True)
+        window._load()
+        self.assertEqual(window.status_var.get(), "خطای بارگذاری")
+        self.assertEqual(_flags(window), (True, True, True))
+        self.assertEqual(window.results_view.clear_calls, 0)
+        self.assertEqual(tabs.get_calls, 0)
+
+    def test_load_validation_failure_before_clear_keeps_flags(self):
+        self.build_structural_model.side_effect = ModelBuildError("تکیه‌گاه متناقض")
+        tabs = _FakeInputTabs()
+        window = _FakeWindow(input_tabs=tabs)
+        _set_flags(window, True)
+        window._load()
+        self.assertEqual(window.status_var.get(), "خطای بارگذاری")
+        self.assertEqual(_flags(window), (True, True, True))
+        self.assertEqual(window.results_view.clear_calls, 0)
+        self.assertEqual(tabs.get_calls, 0)
+        self.assertEqual(tabs.set_calls, [])
+
+    def test_load_success_with_clear_success_resets_all_flags(self):
+        loaded = object()
+        self.load_project.return_value = loaded
+        tabs = _FakeInputTabs(form={"name": "old"})
+        window = _FakeWindow(input_tabs=tabs)
+        _set_flags(window, True)
+        window._load()
+        self.assertIs(window.current_model, loaded)
+        self.assertEqual(tabs.set_calls, [{"name": "loaded"}])
+        self.assertEqual(window.status_var.get(), _STATUS_LOAD_OK)
+        self.assertEqual(window.results_view.clear_calls, 1)
+        self.assertEqual(_flags(window), (False, False, False))
+
+    def test_load_success_with_clear_failure_marks_stale_and_keeps_success_message(self):
+        window = _FakeWindow(
+            input_tabs=_FakeInputTabs(),
+            plot_canvas=_FakeView(clear_errors=[RuntimeError("نمودار قفل")]),
+        )
+        window._load()
+        self.assertEqual(window.status_var.get(), _STATUS_LOAD_OK)
+        self.assertEqual(_flags(window), (True, True, True))
+        self.showinfo.assert_called_once()
+        message = self.showinfo.call_args[0][1]
+        self.assertIn("با موفقیت بارگذاری شد", message)
+        self.assertIn("نمودار قفل", message)
+
+    def test_load_rollback_success_keeps_flags_and_results(self):
+        """set_form_data شکست می‌خورد و بازگردانی موفق است: پاک‌سازی انجام نمی‌شود و فلگ‌ها بدون تغییر می‌مانند."""
+        tabs = _FakeInputTabs(set_errors=[ValueError("ناسازگار"), None])
+        window = _FakeWindow(input_tabs=tabs)
+        _set_flags(window, True)
+        window._load()
+        self.assertEqual(window.status_var.get(), "بارگذاری ناموفق؛ فرم قبلی بازگردانده شد")
+        self.assertEqual(window.results_view.clear_calls, 0)
+        self.assertEqual(_flags(window), (True, True, True))
+        self.showerror.assert_called_once()
+        self.assertIn("فرم قبلی بازگردانده شد", self.showerror.call_args[0][1])
+
+
+# ----------------------------------------------------------------------
+# تست‌های Tk (نیاز به نمایشگر؛ در CI بدون نمایشگر skip می‌شوند)
+# ----------------------------------------------------------------------
 
 
 def _make_root():
@@ -476,6 +729,25 @@ class InputTabsCallbackTest(unittest.TestCase):
     def test_set_on_change_rejects_non_callable(self):
         with self.assertRaises(TypeError):
             self.tabs.set_on_change("not callable")
+
+
+# ----------------------------------------------------------------------
+# اتصال Toolbar (headless، بررسی منبع)
+# ----------------------------------------------------------------------
+
+
+class ToolbarWiringTest(unittest.TestCase):
+
+    def test_toolbar_save_and_load_use_main_window_wrappers(self):
+        source = inspect.getsource(MainWindow._build_toolbar)
+        self.assertIn("command=self._save,", source)
+        self.assertIn("command=self._load,", source)
+        self.assertNotIn("self._actions.save", source)
+        self.assertNotIn("self._actions.load", source)
+
+    def test_wrappers_exist_on_main_window(self):
+        self.assertTrue(callable(getattr(MainWindow, "_save", None)))
+        self.assertTrue(callable(getattr(MainWindow, "_load", None)))
 
 
 if __name__ == "__main__":
