@@ -80,7 +80,7 @@ class MainWindowActions:
     def __init__(self, window: MainWindow) -> None:
         self._window = window
         # نتیجهٔ آخرین تلاش پاک‌سازی نتایج؛ MainWindow برای به‌روزرسانی فلگ‌ها می‌خواند.
-        self.last_clear_ok: bool = True
+        self.last_clear_ok: bool | None = True
 
     # ------------------------------------------------------------------
     # ابزارهای داخلی
