@@ -239,9 +239,29 @@ class NumericTests(unittest.TestCase):
         self.assertIsNone(plot.zero_t["N"])
 
     def test_x_points_span_zero_to_one(self):
+        # Contract: x_points are fractions of the padded display range that
+        # _safe_range builds around the data. The range is extended by the
+        # symmetric margin _RANGE_MARGIN_RATIO on each side of the data span,
+        # so the first data point maps to m / (1 + 2m) and the last to
+        # 1 - m / (1 + 2m). The endpoints are NOT 0.0 and 1.0 by design.
         plot = pc._prepare(make_report({1: member()})).plots[1]
-        self.assertEqual(plot.x_points[0], 0.0)
-        self.assertEqual(plot.x_points[-1], 1.0)
+        xs = plot.x_points
+
+        m = pc._RANGE_MARGIN_RATIO
+        expected_first = m / (1.0 + 2.0 * m)
+        expected_last = 1.0 - expected_first
+
+        self.assertGreaterEqual(len(xs), 2)
+
+        for value in xs:
+            self.assertTrue(math.isfinite(value))
+            self.assertTrue(0.0 <= value <= 1.0)
+
+        for previous, current in zip(xs, xs[1:]):
+            self.assertLess(previous, current)
+
+        self.assertAlmostEqual(xs[0], expected_first, places=9)
+        self.assertAlmostEqual(xs[-1], expected_last, places=9)
 
     def test_build_plan_coordinates_are_finite(self):
         plot = pc._prepare(make_report({1: member()})).plots[1]
