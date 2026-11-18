@@ -3,7 +3,6 @@
 - MainWindowInvalidationTest: منطق MainWindow با _FakeWindow و MainWindowActions واقعی.
   توابع MainWindow روی _FakeWindow به‌عنوان ویژگی کلاس قرار می‌گیرند. هیچ پنجره Tk ساخته
   نمی‌شود؛ messagebox، filedialog و توابع سرویس با mock جایگزین شده‌اند. headless است.
-- SaveLoadWrapperTest: wrapperهای _save و _load با actions واقعی. headless است.
 - ToolbarWiringTest: بررسی منبع _build_toolbar. headless است.
 - InputTabsCallbackTest: کد واقعی InputTabs با Tk. بدون نمایشگر کل کلاس SkipTest می‌دهد.
   Skip موفقیت حساب نمی‌شود.
@@ -306,24 +305,12 @@ class MainWindowInvalidationTest(_Base):
         self.assertEqual(window.status_var.get(), _STATUS_NEW_PROJECT_STALE)
         self.assertEqual(self.showerror.call_count, 1)
 
-    def test_save_and_load_buttons_are_wired_to_main_window_wrappers(self):
-        """این تست به‌روزشده است: دکمه‌ها به wrapperهای _save و _load متصل‌اند، نه مستقیم به actions."""
-        source = inspect.getsource(MainWindow._build_toolbar)
-        self.assertIn("command=self._save,", source)
-        self.assertIn("command=self._load,", source)
-        self.assertNotIn("self._actions.save", source)
-        self.assertNotIn("self._actions.load", source)
-        self.assertNotIn("save_project", source)
-        self.assertNotIn("load_project", source)
-
     def test_successful_analyze_after_stale_failure_resets_all_flags(self):
         """تحلیل موفق با گزارش معتبر پس از شکست stale: گزارش به ویو می‌رسد و هر سه فلگ Reset می‌شوند."""
         report = _valid_report()
         self.run_analysis.return_value = report
         window = _FakeWindow(input_tabs=_FakeInputTabs(model=object()))
-        window._results_stale = True
-        window._stale_error_reported = True
-        window._input_change_invalidated = True
+        _set_flags(window, True)
         window._on_analyze()
         self.assertEqual(len(window.results_view.show_calls), 1)
         self.assertIs(window.results_view.show_calls[0], report)
@@ -340,12 +327,8 @@ class MainWindowInvalidationTest(_Base):
         self.assertTrue(window._results_stale)
         self.assertTrue(window._stale_error_reported)
 
-    def test_successful_build_only_rearms_change_detection(self):
-        """ساخت موفق همراه با پاک‌سازی موفق: هر سه فلگ Reset می‌شوند.
-
-        این تست به‌روزشده است. انتظار قدیمی (حفظ results_stale و stale_error_reported
-        پس از ساخت موفق) با تصمیم تأییدشده جایگزین شد.
-        """
+    def test_successful_build_resets_all_flags_when_clear_succeeds(self):
+        """ساخت موفق همراه با پاک‌سازی موفق: هر سه فلگ Reset می‌شوند."""
         window = _FakeWindow(input_tabs=_FakeInputTabs(model=object()))
         _set_flags(window, True)
         window._on_build_model()
@@ -739,6 +722,7 @@ class InputTabsCallbackTest(unittest.TestCase):
 class ToolbarWiringTest(unittest.TestCase):
 
     def test_toolbar_save_and_load_use_main_window_wrappers(self):
+        """این تست به‌روزشده است: دکمه‌ها به wrapperهای _save و _load متصل‌اند، نه مستقیم به actions."""
         source = inspect.getsource(MainWindow._build_toolbar)
         self.assertIn("command=self._save,", source)
         self.assertIn("command=self._load,", source)
