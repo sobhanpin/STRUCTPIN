@@ -642,7 +642,7 @@ class InputTabsCallbackTest(unittest.TestCase):
         event = mock.Mock(x=1, y=1)
         with mock.patch.object(table._tree, "identify_region", return_value="cell"), \
                 mock.patch.object(table._tree, "identify_row", return_value=iid), \
-                mock.patch.object(table._tree, "identify_column", return_value="#2"):
+                mock.patch.object(table._tree, "identify_column", return_value="#3"):
             table._on_double_click(event)
         self.assertEqual(len(self.calls), 1)
         self.assertIsInstance(table._rows[0]["ux"].get(), bool)
@@ -657,7 +657,7 @@ class InputTabsCallbackTest(unittest.TestCase):
         event = mock.Mock(x=1, y=1)
         with mock.patch.object(table._tree, "identify_region", return_value="cell"), \
                 mock.patch.object(table._tree, "identify_row", return_value=iid), \
-                mock.patch.object(table._tree, "identify_column", return_value="#3"):
+                mock.patch.object(table._tree, "identify_column", return_value="#4"):
             table._on_double_click(event)
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(table._rows[0]["node"], "3")
