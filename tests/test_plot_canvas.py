@@ -429,22 +429,33 @@ class TkBehaviourTests(TkPlotTestCase):
         self.assertEqual(self.count(pc._DRAW_TAG), before_items)
         self.assertEqual(self.count(pc._STAGE_TAG), 0)
         self.assertIs(self.plot._prepared, before_prepared)
-
     def test_unrelated_item_survives_failed_restore_and_original_error_kept(self):
         self.show(make_report({1: member()}))
         marker = self.add_unrelated_item()
 
-        # addtag_withtag fails (1st call) and the first create_line during
-        # restore (2nd create_line overall, since the staged draw used the 1st)
-        # also fails. The original addtag error must still be raised.
-        self.faulty.arm({"addtag_withtag": 1, "create_line": 2})
+        # Count the create_line calls needed for one complete chart.
+        restore_create_line_call = (
+            sum(
+                1
+                for kind, _, _ in self.plot._last_draw_ops
+                if pc._CREATE_METHODS.get(kind) == "create_line"
+            )
+            + 1
+        )
+
+        # The staged draw succeeds, but restoring the previous chart fails.
+        # The original addtag_withtag error must remain the reported error.
+        self.faulty.arm({
+            "addtag_withtag": 1,
+            "create_line": restore_create_line_call,
+        })
+
         with self.assertRaises(tk.TclError) as ctx:
             self.plot.show_report(make_report({2: member()}))
 
         self.assertIn("addtag_withtag", str(ctx.exception))
         self.assertEqual(self.unrelated_items(), (marker,))
         self.assertEqual(self.count(pc._STAGE_TAG), 0)
-        # The previous chart is no longer claimed after a failed restore.
         self.assertEqual(self.plot._last_draw_ops, ())
 
     def test_restore_from_ops_failure_falls_back_to_prepared_data(self):
