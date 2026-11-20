@@ -890,6 +890,7 @@ class PlotCanvas(ttk.Frame):
     # API عمومی
     # ------------------------------------------------------------------
 
+    
     def show_report(
         self,
         report: AnalysisReport,
@@ -908,6 +909,76 @@ class PlotCanvas(ttk.Frame):
         old_member = self._member_var.get()
         old_ops = self._last_draw_ops
 
+        def restore_previous() -> None:
+            """بازسازی وضعیت قبلی بدون پوشاندن خطای اصلی."""
+
+            self._prepared = old_prepared
+
+            restored = False
+
+            if old_ops:
+                try:
+                    self._draw(list(old_ops))
+                    restored = True
+                except Exception:
+                    restored = False
+
+            if not restored:
+                if old_prepared is None:
+                    fallback_ops = _message_ops(
+                        _EMPTY_MESSAGE,
+                        *self._canvas_size(),
+                        self._font_family,
+                    )
+                else:
+                    member_id = old_prepared.label_map.get(
+                        old_member
+                    )
+
+                    if member_id is None and old_labels:
+                        member_id = old_prepared.label_map[
+                            old_labels[0]
+                        ]
+
+                    if member_id is None:
+                        fallback_ops = _message_ops(
+                            _EMPTY_MESSAGE,
+                            *self._canvas_size(),
+                            self._font_family,
+                        )
+                    else:
+                        quantity = self._selected_quantity()
+                        width, height = self._canvas_size()
+
+                        fallback_ops = _build_plan(
+                            old_prepared.plots[member_id],
+                            quantity,
+                            self._plot_title(
+                                member_id,
+                                quantity,
+                            ),
+                            width,
+                            height,
+                            self._font_family,
+                        )
+
+                try:
+                    self._draw(fallback_ops)
+                    restored = True
+                except Exception:
+                    restored = False
+
+            try:
+                self._member_box.configure(
+                    values=old_labels,
+                )
+                self._member_var.set(old_member)
+            except Exception:
+                pass
+
+            if not restored:
+                self._last_draw_ops = ()
+
         if not labels:
             ops = _message_ops(
                 _EMPTY_MESSAGE,
@@ -921,19 +992,7 @@ class PlotCanvas(ttk.Frame):
                 self._member_box.configure(values=[])
                 self._member_var.set("")
             except Exception:
-                if old_ops:
-                    self._draw(list(old_ops))
-
-                self._prepared = old_prepared
-
-                try:
-                    self._member_box.configure(
-                        values=old_labels,
-                    )
-                    self._member_var.set(old_member)
-                except Exception:
-                    pass
-
+                restore_previous()
                 raise
 
             self._prepared = prepared
@@ -952,34 +1011,17 @@ class PlotCanvas(ttk.Frame):
             self._font_family,
         )
 
-        # ابتدا رسم جدید با حفظ نمودار قبلی انجام می‌شود.
         self._draw(ops)
 
-        # فقط پس از موفقیت رسم، کنترل‌های رابط تغییر می‌کنند.
         try:
             self._member_box.configure(values=labels)
             self._member_var.set(labels[0])
-
         except Exception:
-            if old_ops:
-                try:
-                    self._draw(list(old_ops))
-                except Exception:
-                    pass
-
-            self._prepared = old_prepared
-
-            try:
-                self._member_box.configure(
-                    values=old_labels,
-                )
-                self._member_var.set(old_member)
-            except Exception:
-                pass
-
+            restore_previous()
             raise
 
         self._prepared = prepared
+
 
     def clear(self) -> None:
         """پاک‌کردن داده‌ها و نمودار."""
