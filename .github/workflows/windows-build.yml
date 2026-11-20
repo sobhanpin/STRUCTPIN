@@ -28,7 +28,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pyinstaller
 
-            - name: Run engineering tests
+      - name: Run engineering tests
         run: |
           $env:PYTHONPATH = "src"
           $env:PYTHONUTF8 = "1"
