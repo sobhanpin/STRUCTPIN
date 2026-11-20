@@ -1023,8 +1023,18 @@ class PlotCanvas(ttk.Frame):
         self._prepared = prepared
 
 
+    
     def clear(self) -> None:
-        """پاک‌کردن داده‌ها و نمودار."""
+        """پاک‌کردن داده‌ها و نمودار به‌صورت امن."""
+
+        old_prepared = self._prepared
+        old_labels = (
+            list(old_prepared.label_map.keys())
+            if old_prepared is not None
+            else []
+        )
+        old_member = self._member_var.get()
+        old_ops = self._last_draw_ops
 
         ops = _message_ops(
             _EMPTY_MESSAGE,
@@ -1034,9 +1044,80 @@ class PlotCanvas(ttk.Frame):
 
         self._draw(ops)
 
-        self._member_box.configure(values=[])
-        self._member_var.set("")
+        try:
+            self._member_box.configure(values=[])
+            self._member_var.set("")
+        except Exception:
+            self._prepared = old_prepared
+            restored = False
+
+            if old_ops:
+                try:
+                    self._draw(list(old_ops))
+                    restored = True
+                except Exception:
+                    restored = False
+
+            if not restored:
+                if old_prepared is None:
+                    fallback_ops = _message_ops(
+                        _EMPTY_MESSAGE,
+                        *self._canvas_size(),
+                        self._font_family,
+                    )
+                else:
+                    member_id = old_prepared.label_map.get(
+                        old_member
+                    )
+
+                    if member_id is None and old_labels:
+                        member_id = old_prepared.label_map[
+                            old_labels[0]
+                        ]
+
+                    if member_id is None:
+                        fallback_ops = _message_ops(
+                            _EMPTY_MESSAGE,
+                            *self._canvas_size(),
+                            self._font_family,
+                        )
+                    else:
+                        quantity = self._selected_quantity()
+                        width, height = self._canvas_size()
+
+                        fallback_ops = _build_plan(
+                            old_prepared.plots[member_id],
+                            quantity,
+                            self._plot_title(
+                                member_id,
+                                quantity,
+                            ),
+                            width,
+                            height,
+                            self._font_family,
+                        )
+
+                try:
+                    self._draw(fallback_ops)
+                    restored = True
+                except Exception:
+                    restored = False
+
+            try:
+                self._member_box.configure(
+                    values=old_labels,
+                )
+                self._member_var.set(old_member)
+            except Exception:
+                pass
+
+            if not restored:
+                self._last_draw_ops = ()
+
+            raise
+
         self._prepared = None
+
 
     # ------------------------------------------------------------------
     # نگاشت شناسه اعضا
