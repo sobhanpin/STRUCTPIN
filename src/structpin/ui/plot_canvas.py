@@ -1324,14 +1324,18 @@ class PlotCanvas(ttk.Frame):
                 **draw_options,
             )
 
+    
     def _restore_previous_draw(
         self,
         previous: tuple[_Op, ...],
     ) -> None:
-        """بازیابی بهترین‌تلاش نمودار قبلی."""
+        """بازیابی نمودار قبلی بدون حذف آیتم‌های نامرتبط."""
+
+        canvas = self._canvas
 
         try:
-            self._canvas.delete("all")
+            canvas.delete(_STAGE_TAG)
+            canvas.delete(_DRAW_TAG)
 
             if previous:
                 self._create_ops(
@@ -1342,8 +1346,17 @@ class PlotCanvas(ttk.Frame):
             self._last_draw_ops = previous
 
         except Exception:
-            # خطای بازیابی نباید خطای اصلی را پنهان کند.
-            pass
+            try:
+                canvas.delete(_STAGE_TAG)
+            except Exception:
+                pass
+
+            try:
+                canvas.delete(_DRAW_TAG)
+            except Exception:
+                pass
+
+            self._last_draw_ops = ()
 
     def _draw(
         self,
