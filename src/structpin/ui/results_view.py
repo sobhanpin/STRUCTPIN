@@ -215,6 +215,23 @@ def _prepare_rows(report: AnalysisReport) -> _Rows:
     )
 
 
+def _attach_cleanup_note(exc: BaseException, cleanup_exc: BaseException) -> None:
+    """افزودن خطای پاک‌سازی به‌عنوان توضیح به خطای اصلی، بدون جایگزین‌کردن آن.
+
+    از add_note (Python 3.11+) استفاده می‌شود. در نسخه‌های قدیمی‌تر، فهرست
+    __notes__ به‌صورت دستی تکمیل می‌شود تا توضیح در هر حال ثبت باشد.
+    """
+    note = (
+        "پاک‌سازی نتایج پس از این خطا نیز ناموفق بود: "
+        f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+    )
+    add_note = getattr(exc, "add_note", None)
+    if add_note is not None:
+        add_note(note)
+    else:
+        exc.__notes__ = [*getattr(exc, "__notes__", []), note]
+
+
 class ResultsView(ttk.Frame):
     """نمایش گزارش تحلیل در چند تب جدولی.
 
@@ -357,7 +374,8 @@ class ResultsView(ttk.Frame):
 
         ابتدا همهٔ داده‌ها (شامل n_points و warnings) اعتبارسنجی و آماده می‌شوند؛ تا
         آن زمان محتوای رابط تغییر نمی‌کند. اگر در مرحلهٔ درج خطایی رخ دهد، رابط پاک
-        می‌شود و خطا دوباره پرتاب می‌شود.
+        می‌شود و همان خطا دوباره پرتاب می‌شود. اگر خود پاک‌سازی هم شکست بخورد، خطای
+        اصلی تغییر نمی‌کند و خطای پاک‌سازی فقط به آن به‌عنوان توضیح افزوده می‌شود.
 
         Raises:
             ValueError: گزارش یا هر بخش آن ساختار معتبر ندارد.
@@ -375,8 +393,12 @@ class ResultsView(ttk.Frame):
             self._fill_tree(self._internal_tree, rows.internal)
             self._fill_warnings(rows.warnings)
             self._fill_summary(report, len(rows.warnings))
-        except Exception:
-            self.clear()
+        except Exception as exc:
+            try:
+                self.clear()
+            except Exception as cleanup_exc:
+                # خطای اصلی دست‌نخورده می‌ماند؛ خطای پاک‌سازی فقط توضیح آن می‌شود.
+                _attach_cleanup_note(exc, cleanup_exc)
             raise
 
     def clear(self) -> None:
