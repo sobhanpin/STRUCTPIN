@@ -303,6 +303,54 @@ class AnalyzeTest(_ActionsTestBase):
         self.assertEqual(self.messagebox.showerror.call_count, 1)
         self.assertIn("نمودار", self.messagebox.showerror.call_args[0][1])
 
+    def test_plot_canvas_value_error_triggers_display_error_path(self):
+        """plot_canvas.show_report با ValueError شکست می‌خورد: وضعیت «خطای نمایش»، پاک‌سازی هر دو ویو و متن خطا در پیام."""
+        self.run_analysis.return_value = _valid_report()
+        window = _FakeWindow(
+            input_tabs=_FakeInputTabs(model=object()),
+            plot_canvas=_FakeView(show_error=ValueError("نمودار بد")),
+        )
+        self._actions(window).analyze()
+        self.assertEqual(len(window.results_view.show_calls), 1)
+        self.assertEqual(window.statuses, ["خطای نمایش"])
+        self.assertEqual(window.results_view.clear_calls, 1)
+        self.assertEqual(window.plot_canvas.clear_calls, 1)
+        self.messagebox.showerror.assert_called_once()
+        self.assertIn("نمودار بد", self.messagebox.showerror.call_args[0][1])
+
+    def test_results_view_unexpected_error_skips_plot_and_clears_both(self):
+        """results_view.show_report خطای غیرمنتظره می‌دهد: نمودار نمایش داده نمی‌شود، وضعیت «خطای غیرمنتظره»، هر دو ویو پاک می‌شوند."""
+        self.run_analysis.return_value = _valid_report()
+        window = _FakeWindow(
+            input_tabs=_FakeInputTabs(model=object()),
+            results_view=_FakeView(show_error=RuntimeError("جدول غیرمنتظره")),
+        )
+        self._actions(window).analyze()
+        self.assertEqual(window.plot_canvas.show_calls, [])
+        self.assertEqual(window.statuses, ["خطای غیرمنتظره"])
+        self.assertEqual(window.results_view.clear_calls, 1)
+        self.assertEqual(window.plot_canvas.clear_calls, 1)
+        self.assertEqual(self.messagebox.showerror.call_count, 1)
+        self.assertEqual(self.messagebox.showerror.call_args[0][0], "خطای غیرمنتظره")
+        self.assertIn("جدول غیرمنتظره", self.messagebox.showerror.call_args[0][1])
+
+    def test_plot_failure_preserves_cleanup_failure_in_error_message(self):
+        """نمایش نمودار شکست می‌خورد و پاک‌سازی جدول هم خطا می‌دهد: هر دو خطا در پیام نهایی باشند و پاک‌سازی نمودار انجام شود."""
+        self.run_analysis.return_value = _valid_report()
+        window = _FakeWindow(
+            input_tabs=_FakeInputTabs(model=object()),
+            results_view=_FakeView(clear_error=RuntimeError("جدول قفل")),
+            plot_canvas=_FakeView(show_error=ValueError("نمودار بد")),
+        )
+        self._actions(window).analyze()
+        self.assertEqual(window.statuses, ["خطای نمایش"])
+        self.assertEqual(window.results_view.clear_calls, 1)
+        self.assertEqual(window.plot_canvas.clear_calls, 1)
+        self.messagebox.showerror.assert_called_once()
+        message = self.messagebox.showerror.call_args[0][1]
+        self.assertIn("نمودار بد", message)
+        self.assertIn("جدول قفل", message)
+
 
 # ----------------------------------------------------------------------
 # پاک‌سازی نتایج
